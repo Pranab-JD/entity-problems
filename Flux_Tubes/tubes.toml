@@ -1,0 +1,91 @@
+[simulation]
+    name    = "/gpfs/projects/ehpc284/flux_tubes/tubes"
+    engine  = "srpic"
+    runtime = 50.0
+
+    [simulation.domain]
+        decomposition = [-1, -1, -1]
+
+###! GRID
+[grid]
+    resolution = [51, 51, 51]
+    extent     = [[0.0, 20.0], [-10.0, 10.0], [0.0, 20.0]]
+
+    [grid.metric]
+        metric = "minkowski"
+
+    [grid.boundaries]
+        fields    = [["MATCH", "MATCH"], ["MATCH", "MATCH"], ["PERIODIC"]]
+        particles = [["ABSORB", "ABSORB"], ["ABSORB", "ABSORB"], ["PERIODIC"]] 
+
+###! SCALES
+[scales]
+    larmor0    = 1.0
+    skindepth0 = 1.0
+
+###! ALGORITHMS
+[algorithms]
+    current_filters = 8
+
+    [algorithms.timestep]
+        CFL = 0.5
+
+###! PARTICLES
+[particles]
+    ppc0 = 16.0
+
+    [[particles.species]]
+        label    = "e-"
+        mass     = 1.0
+        charge   = -1.0
+        maxnpart = 1e8
+
+    [[particles.species]]
+        label    = "e+"
+        mass     = 1.0
+        charge   = 1.0
+        maxnpart = 1e8
+
+###! SETUP
+[setup]
+    #* Plasma
+    sigma   = 1.0
+    c_omp   = 10.0
+    background_T = 0.01
+
+    #* Flux Tubes
+    beta_kick    = 0.1
+    c_param      = 0.0001
+
+    init_J       = true
+    init_rho     = true
+    init_ufl     = true
+    single_tube  = false
+    smooth_flds  = true
+
+    nsmooth      = 16
+    ppc_buff     = 8.0
+
+###! OUTPUT
+[output]
+    interval = 100
+    format   = "BPFile"
+
+    [output.fields]
+        quantities = ["N", "B", "E", "J"]
+
+    [output.particles]
+        enable = false
+
+    [output.spectra]
+        enable = false
+
+###! DIAGNOSTICS
+[diagnostics]
+    interval  = 50
+    log_level = "WARNING"
+
+###! CHECKPOINT
+[checkpoint]
+    interval = 5000
+    keep     = 1

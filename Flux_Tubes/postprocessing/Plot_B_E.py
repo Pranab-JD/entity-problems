@@ -1,5 +1,8 @@
-#!/usr/bin/env python3
+"""
+Created on Sat Apr 18 06:06 2026
 
+@author: Pranab JD, ChatGPT
+"""
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")

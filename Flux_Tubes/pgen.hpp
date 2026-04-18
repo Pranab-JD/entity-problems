@@ -139,8 +139,8 @@ public:
 
                         real_t tmp1 = 0.25 * arr(imax-1, j, k) + 0.5  * arr(imax, j, k) + 0.25 * arr(imax+1, j, k);
 
-                        arr(imax - 1, j, k) = tmp2;
-                        arr(imax,     j, k) = tmp1;
+                        arr(imax-1, j, k) = tmp2;
+                        arr(imax, j, k)   = tmp1;
                     }
             }
             else
