@@ -8,7 +8,7 @@ Usage:
     input="/scratch/project_465002528/pjd/flux_tubes/tubes/fields/"
     output="/scratch/project_465002528/pjd/flux_tubes/tubes/plots/"
     
-    srun python3 ../postprocessing/Plot_B_E.py "$input" "$output"
+    srun python3 ../postprocessing/Plot_J_rho.py "$input" "$output"
 
 """
 
@@ -70,40 +70,35 @@ for fname in files_local:
         z = np.asarray(s.read("X3"))
 
         # fields (3D)
-        Bx = np.asarray(s.read("fB1"))
-        By = np.asarray(s.read("fB2"))
-        Bz = np.asarray(s.read("fB3"))
+        Jx = np.asarray(s.read("fJ1"))
+        Jy = np.asarray(s.read("fJ2"))
+        Jz = np.asarray(s.read("fJ3"))
 
-        Ex = np.asarray(s.read("fE1"))
-        Ey = np.asarray(s.read("fE2"))
-        Ez = np.asarray(s.read("fE3"))
+        rho = np.asarray(s.read("fN"))
+        # Ey = np.asarray(s.read("fE2"))
+        # Ez = np.asarray(s.read("fE3"))
 
         # ----------------------------------------------------
         # slice (mid-plane z)
         # ----------------------------------------------------
-        k = Bx.shape[2] // 2
+        # k = Jx.shape[2] // 2
 
-        Bx = Bx[0, :, :]
-        By = By[0, :, :]
-        Bz = Bz[0, :, :]
-
-        Ex = Ex[0, :, :]
-        Ey = Ey[0, :, :]
-        Ez = Ez[0, :, :]
-
-        B_mag = np.sqrt(Bx**2 + By**2 + Bz**2)
-        E_mag = np.sqrt(Ex**2 + Ey**2 + Ez**2)
+        Jx = Jx[0, :, :]
+        Jy = Jy[0, :, :]
+        Jz = Jz[0, :, :]
+        rho = rho[0, :, :]
+        
+        J_mag = np.sqrt(Jx**2 + Jy**2 + Jz**2)
 
     # ========================================================
     # Plot
     # ========================================================
-    fig, axs = plt.subplots(2, 4, figsize=(12, 6))
+    fig, axs = plt.subplots(2, 3, figsize=(10, 6))
 
-    fields = [(Bx, "Bx"), (By, "By"), (Bz, "Bz"), (B_mag, "|B|"),
-              (Ex, "Ex"), (Ey, "Ey"), (Ez, "Ez"), (E_mag, "|E|")]
+    fields = [(Jx, "Jx"), (Jy, "Jy"), (Jz, "Jz"), (J_mag, "|J|"), (rho, "rho")]
 
     for ax, (data, title) in zip(axs.flat, fields):
-        im = ax.imshow(data, origin="lower", aspect="equal", extent=[x.min(), x.max(), y.min(), y.max()], cmap="seismic")
+        im = ax.imshow(data, origin="lower", aspect="equal", extent=[x.min(), x.max(), y.min(), y.max()], cmap="inferno")
         
         ax.set_title(title)
         ax.tick_params(axis="both", which="major", labelsize=10, length=6)
@@ -115,7 +110,7 @@ for fname in files_local:
 
     fig.tight_layout()
 
-    outfile = f"{outdir}/fields_{step_str}.png"
+    outfile = f"{outdir}/moments_{step_str}.png"
     fig.savefig(outfile, dpi=150)
     plt.close(fig)
 
