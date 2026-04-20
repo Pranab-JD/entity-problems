@@ -13,7 +13,7 @@ def add_curved_B(ax, x0, y0, r, color="C4", flip=False):
         # clockwise
         arc1 = Arc((x0,y0),1.4*r,1.4*r,theta1=120,theta2=180,color=color,lw=2)
         arc2 = Arc((x0,y0),1.4*r,1.4*r,theta1=300,theta2=360,color=color,lw=2)
-        ang_r, ang_l, sign = 60, 240, 1
+        ang_r, ang_l, sign = 60, 240, -1
     else:
         # anticlockwise
         arc1 = Arc((x0,y0),1.4*r,1.4*r,theta1=120,theta2=180,color=color,lw=2)
@@ -69,8 +69,8 @@ ax.plot(x0 + 2., 1.525, marker=r'$\odot$', markersize=18, color="C3")
 ax.text(x0 + 2.2, 1.4, r"$B_z \sim \sqrt{J_0^2 + c_{\mathrm{param}}}$", ha="left", va="bottom", color="C3")
 
 # Currents
-ax.plot(x0, y1, marker=r'$\otimes$', markersize=18, color="C5")       # lower tube: Jz > 0 (out of plane)
-ax.plot(x0, y2, marker=r'$\odot$', markersize=18, color="C5")     # upper tube: Jz < 0 (into plane)
+ax.plot(x0, y1, marker=r'$\odot$', markersize=18, color="C5")     # lower tube: Jz > 0 (out of plane)
+ax.plot(x0, y2, marker=r'$\odot$', markersize=18, color="C5")     # upper tube: Jz > 0 (out plane)
 
 ax.text(x0 + 0.4, y1, r"$J_z$", ha="left", va="center", color="C5")
 ax.text(x0 + 0.4, y2, r"$-J_z$",ha="left", va="center", color="C5")

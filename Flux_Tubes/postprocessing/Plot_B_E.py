@@ -81,15 +81,15 @@ for fname in files_local:
         # ----------------------------------------------------
         # slice (mid-plane z)
         # ----------------------------------------------------
-        k = Bx.shape[2] // 2
+        k = Bx.shape[0] // 2
 
-        Bx = Bx[0, :, :]
-        By = By[0, :, :]
-        Bz = Bz[0, :, :]
+        Bx = Bx[k, :, :]
+        By = By[k, :, :]
+        Bz = Bz[k, :, :]
 
-        Ex = Ex[0, :, :]
-        Ey = Ey[0, :, :]
-        Ez = Ez[0, :, :]
+        Ex = Ex[k, :, :]
+        Ey = Ey[k, :, :]
+        Ez = Ez[k, :, :]
 
         B_mag = np.sqrt(Bx**2 + By**2 + Bz**2)
         E_mag = np.sqrt(Ex**2 + Ey**2 + Ez**2)
@@ -108,8 +108,8 @@ for fname in files_local:
         ax.set_title(title)
         ax.tick_params(axis="both", which="major", labelsize=10, length=6)
         ax.tick_params(axis="both", which="minor", labelsize=8, length=3)
-        ax.set_xlabel("Y")
-        ax.set_ylabel("Z")
+        ax.set_xlabel("X")
+        ax.set_ylabel("Y")
         
         fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
 

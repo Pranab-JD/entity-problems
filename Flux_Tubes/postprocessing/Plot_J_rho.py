@@ -75,18 +75,16 @@ for fname in files_local:
         Jz = np.asarray(s.read("fJ3"))
 
         rho = np.asarray(s.read("fN"))
-        # Ey = np.asarray(s.read("fE2"))
-        # Ez = np.asarray(s.read("fE3"))
 
         # ----------------------------------------------------
         # slice (mid-plane z)
         # ----------------------------------------------------
-        # k = Jx.shape[2] // 2
+        k = Jx.shape[0] // 2
 
-        Jx = Jx[0, :, :]
-        Jy = Jy[0, :, :]
-        Jz = Jz[0, :, :]
-        rho = rho[0, :, :]
+        Jx = Jx[k, :, :]
+        Jy = Jy[k, :, :]
+        Jz = Jz[k, :, :]
+        rho = rho[k, :, :]
         
         J_mag = np.sqrt(Jx**2 + Jy**2 + Jz**2)
 
@@ -103,8 +101,8 @@ for fname in files_local:
         ax.set_title(title)
         ax.tick_params(axis="both", which="major", labelsize=10, length=6)
         ax.tick_params(axis="both", which="minor", labelsize=8, length=3)
-        ax.set_xlabel("Y")
-        ax.set_ylabel("Z")
+        ax.set_xlabel("X")
+        ax.set_ylabel("Y")
         
         fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
 
