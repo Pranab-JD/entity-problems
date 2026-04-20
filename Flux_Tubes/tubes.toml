@@ -1,21 +1,21 @@
 [simulation]
-    name    = "/gpfs/projects/ehpc284/flux_tubes/tubes"
+    name    = "/scratch/project_465002528/pjd/flux_tubes/tubes"
     engine  = "srpic"
-    runtime = 50.0
+    runtime = 10.0
 
     [simulation.domain]
         decomposition = [-1, -1, -1]
 
 ###! GRID
 [grid]
-    resolution = [51, 51, 51]
+    resolution = [256, 256, 256]
     extent     = [[0.0, 20.0], [-10.0, 10.0], [0.0, 20.0]]
 
     [grid.metric]
         metric = "minkowski"
 
     [grid.boundaries]
-        fields    = [["MATCH", "MATCH"], ["MATCH", "MATCH"], ["PERIODIC"]]
+        fields    = [["MATCH", "MATCH"],   ["MATCH", "MATCH"],   ["PERIODIC"]]
         particles = [["ABSORB", "ABSORB"], ["ABSORB", "ABSORB"], ["PERIODIC"]] 
 
 ###! SCALES
@@ -49,26 +49,29 @@
 ###! SETUP
 [setup]
     #* Plasma
-    sigma   = 1.0
-    c_omp   = 10.0
-    background_T = 0.01
+    B0           = 1.0          # B field normalisation
+    sigma        = 1.0          # Magnetisation
+    skin_depth   = 1.0          # Plasma skin depth
+    background_T = 0.01         # Background temperature
+    
 
     #* Flux Tubes
-    beta_kick    = 0.1
-    c_param      = 0.0001
+    beta_kick    = 0.2          # v/c --- E x B drift
+    c_param      = 0.1          # Base guide field (check if is this needed?)
+    radius_fraction  = 4.5      # Radius of the flux tubes
 
-    init_J       = true
-    init_rho     = true
-    init_ufl     = true
-    single_tube  = false
-    smooth_flds  = true
-
-    nsmooth      = 16
-    ppc_buff     = 8.0
+    #* Overall system
+    init_J       = true         # Enforces J = curl(B) --- needed forforce free
+    init_rho     = true         # Charge correction (ρ = ∇⋅E) to avoid charge imbalance noise
+    init_ufl     = true         # E × B drift velocity of the particles
+    single_tube  = false        # True = 2 flux tubes; False = 1 flux tube
+    
+    smooth_flds  = true         # Smooth fields
+    nsmooth      = 16           # Number of smoothings
 
 ###! OUTPUT
 [output]
-    interval = 100
+    interval = 5
     format   = "BPFile"
 
     [output.fields]
