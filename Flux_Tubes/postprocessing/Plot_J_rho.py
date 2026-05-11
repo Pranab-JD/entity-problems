@@ -20,16 +20,16 @@ from adios2 import Stream
 import argparse, os, glob
 import matplotlib.pyplot as plt
 
-# ============================================================
-# MPI setup
-# ============================================================
+#! ============================================================
+#! MPI setup
+#! ============================================================
 comm = MPI.COMM_WORLD
 rank = comm.Get_rank()
 size = comm.Get_size()
 
-# ============================================================
-# Args
-# ============================================================
+#! ============================================================
+#! Args
+#! ============================================================
 parser = argparse.ArgumentParser()
 parser.add_argument("base", type=str, help="Directory with fields.*.bp")
 parser.add_argument("outdir", type=str, help="Output directory")
@@ -43,9 +43,9 @@ if rank == 0:
     os.makedirs(outdir, exist_ok=True)
 comm.Barrier()
 
-# ============================================================
-# Find all files & distribute across ranks
-# ============================================================
+#! ============================================================
+#! Find all files & distribute across ranks
+#! ============================================================
 files = sorted(glob.glob(f"{base}/fields.*.bp"))
 
 if rank == 0:
@@ -54,9 +54,9 @@ if rank == 0:
 
 files_local = files[rank::size]
 
-# ============================================================
-# Loop over all files
-# ============================================================
+#! ============================================================
+#! Loop over all files
+#! ============================================================
 for fname in files_local:
 
     step_str = fname.split(".")[-2]
@@ -69,34 +69,40 @@ for fname in files_local:
         y = np.asarray(s.read("X2"))
         z = np.asarray(s.read("X3"))
 
-        # fields (3D)
+        # Current (3D)
         Jx = np.asarray(s.read("fJ1"))
         Jy = np.asarray(s.read("fJ2"))
         Jz = np.asarray(s.read("fJ3"))
 
+        # Density (3D)
         rho = np.asarray(s.read("fN"))
 
-        # ----------------------------------------------------
-        # slice (mid-plane z)
-        # ----------------------------------------------------
-        k = Jx.shape[0] // 2
+        # Slice at X mid-plane
+        x_half = Jx.shape[0] // 2
 
-        Jx = Jx[k, :, :]
-        Jy = Jy[k, :, :]
-        Jz = Jz[k, :, :]
-        rho = rho[k, :, :]
+        Jx = Jx[x_half, :, :]
+        Jy = Jy[x_half, :, :]
+        Jz = Jz[x_half, :, :]
+        rho = rho[x_half, :, :]
         
         J_mag = np.sqrt(Jx**2 + Jy**2 + Jz**2)
 
-    # ========================================================
-    # Plot
-    # ========================================================
+    #! ========================================================
+    #! Plot
+    #! ========================================================
     fig, axs = plt.subplots(2, 3, figsize=(10, 6))
+
+    field_limits = {"Jx": (-1.0, 1.0), "Jy": (-1.0, 1.0), "Jz": (-2.0, 2.0), 
+                    "|J|": (0.0, 2.5), "rho": (0.0, 4.0)}
 
     fields = [(Jx, "Jx"), (Jy, "Jy"), (Jz, "Jz"), (J_mag, "|J|"), (rho, "rho")]
 
     for ax, (data, title) in zip(axs.flat, fields):
-        im = ax.imshow(data, origin="lower", aspect="equal", extent=[x.min(), x.max(), y.min(), y.max()], cmap="inferno")
+
+        vmin, vmax = field_limits[title]
+
+        im = ax.imshow(data, origin="lower", aspect="equal", extent=[x.min(), x.max(), y.min(), y.max()], 
+                             cmap="hot", vmin=vmin, vmax=vmax)
         
         ax.set_title(title)
         ax.tick_params(axis="both", which="major", labelsize=10, length=6)
@@ -114,9 +120,9 @@ for fname in files_local:
 
     print(f"Saved {outfile}", flush=True)
 
-# ============================================================
-# Sync
-# ============================================================
+#! ============================================================
+#! Sync
+#! ============================================================
 
 comm.Barrier()
 

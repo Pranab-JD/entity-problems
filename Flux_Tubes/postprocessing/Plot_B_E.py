@@ -20,16 +20,16 @@ from adios2 import Stream
 import argparse, os, glob
 import matplotlib.pyplot as plt
 
-# ============================================================
-# MPI setup
-# ============================================================
+#! ============================================================
+#! MPI setup
+#! ============================================================
 comm = MPI.COMM_WORLD
 rank = comm.Get_rank()
 size = comm.Get_size()
 
-# ============================================================
-# Args
-# ============================================================
+#! ============================================================
+#! Args
+#! ============================================================
 parser = argparse.ArgumentParser()
 parser.add_argument("base", type=str, help="Directory with fields.*.bp")
 parser.add_argument("outdir", type=str, help="Output directory")
@@ -43,9 +43,9 @@ if rank == 0:
     os.makedirs(outdir, exist_ok=True)
 comm.Barrier()
 
-# ============================================================
-# Find all files & distribute across ranks
-# ============================================================
+#! ============================================================
+#! Find all files & distribute across ranks
+#! ============================================================
 files = sorted(glob.glob(f"{base}/fields.*.bp"))
 
 if rank == 0:
@@ -54,9 +54,9 @@ if rank == 0:
 
 files_local = files[rank::size]
 
-# ============================================================
-# Loop over all files
-# ============================================================
+#! ============================================================
+#! Loop over all files
+#! ============================================================
 for fname in files_local:
 
     step_str = fname.split(".")[-2]
@@ -69,50 +69,56 @@ for fname in files_local:
         y = np.asarray(s.read("X2"))
         z = np.asarray(s.read("X3"))
 
-        # fields (3D)
+        # Magnetic Field (3D)
         Bx = np.asarray(s.read("fB1"))
         By = np.asarray(s.read("fB2"))
         Bz = np.asarray(s.read("fB3"))
 
+        # Electric Field (3D)
         Ex = np.asarray(s.read("fE1"))
         Ey = np.asarray(s.read("fE2"))
         Ez = np.asarray(s.read("fE3"))
 
-        # ----------------------------------------------------
-        # slice (mid-plane z)
-        # ----------------------------------------------------
-        k = Bx.shape[0] // 2
+        # Slice at X mid-plane
+        x_half = Bx.shape[0] // 2
 
-        Bx = Bx[k, :, :]
-        By = By[k, :, :]
-        Bz = Bz[k, :, :]
+        Bx = Bx[x_half, :, :]
+        By = By[x_half, :, :]
+        Bz = Bz[x_half, :, :]
 
-        Ex = Ex[k, :, :]
-        Ey = Ey[k, :, :]
-        Ez = Ez[k, :, :]
+        Ex = Ex[x_half, :, :]
+        Ey = Ey[x_half, :, :]
+        Ez = Ez[x_half, :, :]
 
         B_mag = np.sqrt(Bx**2 + By**2 + Bz**2)
         E_mag = np.sqrt(Ex**2 + Ey**2 + Ez**2)
 
-    # ========================================================
-    # Plot
-    # ========================================================
+    #! ========================================================
+    #! Plot
+    #! ========================================================
     fig, axs = plt.subplots(2, 4, figsize=(12, 6))
+
+    field_limits = {"Bx": (-0.25, 0.25), "By": (-0.25, 0.25), "Bz": (0.0, 1.0), "|B|": (0.0, 1.5),
+                    "Ex": (-0.25, 0.25), "Ey": (-0.25, 0.25), "Ez": (-0.25, 0.25), "|E|": (0.0, 0.4)}
 
     fields = [(Bx, "Bx"), (By, "By"), (Bz, "Bz"), (B_mag, "|B|"),
               (Ex, "Ex"), (Ey, "Ey"), (Ez, "Ez"), (E_mag, "|E|")]
 
     for ax, (data, title) in zip(axs.flat, fields):
-        im = ax.imshow(data, origin="lower", aspect="equal", extent=[x.min(), x.max(), y.min(), y.max()], cmap="seismic")
         
+        vmin, vmax = field_limits[title]
+
+        im = ax.imshow(data, origin="lower", aspect="equal", extent=[x.min(), x.max(), y.min(), y.max()],
+                             cmap="seismic", vmin=vmin, vmax=vmax)
+
         ax.set_title(title)
         ax.tick_params(axis="both", which="major", labelsize=10, length=6)
         ax.tick_params(axis="both", which="minor", labelsize=8, length=3)
         ax.set_xlabel("X")
         ax.set_ylabel("Y")
-        
-        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
 
+        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    
     fig.tight_layout()
 
     outfile = f"{outdir}/fields_{step_str}.png"
@@ -121,9 +127,9 @@ for fname in files_local:
 
     print(f"Saved {outfile}", flush=True)
 
-# ============================================================
-# Sync
-# ============================================================
+#! ============================================================
+#! Sync
+#! ============================================================
 
 comm.Barrier()
 
