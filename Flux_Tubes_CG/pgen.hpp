@@ -108,7 +108,7 @@ namespace user
     struct InitFields 
     {
         // First zero of J₁ — the eigenvalue of the Lundquist-tube problem
-        static constexpr real_t ALPHA { static_cast<real_t>(3.8317059702075) };
+        static constexpr real_t ALPHA { static_cast<real_t>(3.8317059702075125) };
 
         // Default-constructible so PGen can declare it before the ctor body runs
         InitFields() = default;
@@ -449,312 +449,259 @@ namespace user
         //*    2. Apply current + E×B drift via a Lorentz boost to every particle.
         //*    3. [init_rho] Perturb particle weights by the charge density from div(E).
         //* -----------------------------------------------------------------------
-        inline void InitPrtls(Domain<S, M>& domain) 
+        inline void InitPrtls(Domain<S, M>& domain)
         {
-
             const auto& mesh = domain.mesh;
-
-            // Buffer-zone boundaries derived from the *global* box
-            // (xmin_g / xmax_g are stored in the constructor from the metadomain).
             const real_t Lx   = xmax_g - xmin_g;
-            const real_t x_lo = xmin_g + static_cast<real_t>(0.2) * Lx;
-            const real_t x_hi = xmin_g + static_cast<real_t>(0.8) * Lx;
-
-            // Density fraction for buffer particles.
-            // Tristan injects ppc_buff particles/cell in the buffer, each with
-            // weight = ppc0/ppc_buff, preserving the physical density.
             const real_t ppc0     = params.template get<real_t>("particles.ppc0", static_cast<real_t>(4));
-            const real_t buf_frac = ppc_buff / ppc0;   // <1 ↔ fewer macro-particles
 
-            // ---- Stage 1: inject thermal plasma ----
-            //
-            // InjectUniformMaxwellians (plural) is the box-aware overload; signature:
-            //   (params, domain, density, {T_e,T_i}, species, {drift_e,drift_i},
-            //    use_weights, box)
-            // Both species get the same temperature and zero bulk drift here;
-            // the current-carrying drift is built and Lorentz-boosted in Stage 2.
+            // ================================================================
+            //  STEP 0: Smooth fields — mirrors Tristan's filterFields(nsmooth)
+            //  Fields smoothed: ex1, ex3, bx1, bx2, bx3  (not ex2 = Ey)
+            //  Filter: 1-2-1 applied nsmooth times in x and y separately.
+            //  A temp copy is mandatory to avoid read-write races in parallel.
+            //  3D arrays — field is uniform in z but arrays span all k layers.
+            // ================================================================
+            // {
+            //     const int ni = static_cast<int>(mesh.n_active(in::x1));
+            //     const int nj = static_cast<int>(mesh.n_active(in::x2));
+            //     const int nk = static_cast<int>(mesh.n_active(in::x3));
+
+            //     const int ng = N_GHOSTS;
+
+            //     const int64_t i_lo = -ng,  i_hi = ni + ng - 1;
+            //     const int64_t j_lo = -ng,  j_hi = nj + ng - 1;
+            //     const int64_t k_lo = -ng,  k_hi = nk + ng - 1;
+
+            //     const int64_t ni_g = i_hi - i_lo + 1;
+            //     const int64_t nj_g = j_hi - j_lo + 1;
+            //     const int64_t nk_g = k_hi - k_lo + 1;
+
+            //     Kokkos::View<real_t***, Kokkos::LayoutRight> temp(
+            //         "smooth_temp",
+            //         static_cast<std::size_t>(ni),
+            //         static_cast<std::size_t>(nj),
+            //         static_cast<std::size_t>(nk));
+
+            //     const em comps[5] = { em::ex1, em::ex3, em::bx1, em::bx2, em::bx3 };
+            //     auto& em_fld = domain.fields.em;
+
+            //     using Policy = Kokkos::MDRangePolicy<Kokkos::Rank<3>>;
+            //     const auto active = Policy({ 0, 0, 0 }, { ni, nj, nk });
+
+            //     for (int pass = 0; pass < nsmooth; ++pass) {
+
+            //         for (auto comp : comps) {
+
+            //             // ---- Filter in X ----
+            //             // Read from em_fld (ghost cells valid from previous CommunicateFields).
+            //             // Write to active-only temp to avoid read-write races.
+            //             Kokkos::parallel_for("SmoothX", active,
+            //                 KOKKOS_LAMBDA(int i, int j, int k) {
+            //                     temp(i, j, k) =
+            //                         static_cast<real_t>(0.25) * em_fld(i-1, j, k, comp)
+            //                     + static_cast<real_t>(0.50) * em_fld(i,   j, k, comp)
+            //                     + static_cast<real_t>(0.25) * em_fld(i+1, j, k, comp);
+            //                 });
+            //             Kokkos::fence();
+
+            //             // Copy x-smoothed values back into em_fld active cells.
+            //             // Ghost cells in y are still valid from the last CommunicateFields.
+            //             Kokkos::parallel_for("CopyBackX", active,
+            //                 KOKKOS_LAMBDA(int i, int j, int k) {
+            //                     em_fld(i, j, k, comp) = temp(i, j, k);
+            //                 });
+            //             Kokkos::fence();
+
+            //             // ---- Filter in Y ----
+            //             // x-ghost cells are now stale but SmoothY only reads j±1 neighbours;
+            //             // the y-ghost cells were not touched by SmoothX so they remain valid.
+            //             Kokkos::parallel_for("SmoothY", active,
+            //                 KOKKOS_LAMBDA(int i, int j, int k) {
+            //                     temp(i, j, k) =
+            //                         static_cast<real_t>(0.25) * em_fld(i, j-1, k, comp)
+            //                     + static_cast<real_t>(0.50) * em_fld(i, j,   k, comp)
+            //                     + static_cast<real_t>(0.25) * em_fld(i, j+1, k, comp);
+            //                 });
+            //             Kokkos::fence();
+
+            //             Kokkos::parallel_for("CopyBackY", active,
+            //                 KOKKOS_LAMBDA(int i, int j, int k) {
+            //                     em_fld(i, j, k, comp) = temp(i, j, k);
+            //                 });
+            //             Kokkos::fence();
+
+            //         } // end loop over components
+
+            //         // Refill ghost cells once per pass (all 5 components).
+            //         global_domain.CommunicateFields(domain, Comm::E | Comm::B);
+
+            //     } // end pass loop
+            // }
+
+            // ================================================================
+            //  STEP 1: Inject thermal plasma
+            // ================================================================
             {
                 const auto temps = std::make_pair(background_T, background_T);
                 const auto no_drift = std::make_pair(
-                std::vector<real_t>{ ZERO, ZERO, ZERO },
-                std::vector<real_t>{ ZERO, ZERO, ZERO });
+                    std::vector<real_t>{ ZERO, ZERO, ZERO },
+                    std::vector<real_t>{ ZERO, ZERO, ZERO });
 
                 boundaries_t<real_t> box_all;
                 for (auto d = 0u; d < M::Dim; ++d)
                     box_all.push_back(Range::All);
 
                 arch::InjectUniformMaxwellians<S, M>(
-                params, domain, ONE, temps, { 1, 2 }, no_drift, false, box_all);
+                    params, domain, ONE, temps, { 1, 2 }, no_drift, false, box_all);
             }
 
-            // ---- Stage 2: current-driven + E×B Lorentz boost ----
+            // ================================================================
+            //  STEP 2: Current-driven + E×B Lorentz boost
             //
-            // Tristan uses the already-initialised grid fields, smooths them in
-            // userInitFields(), computes J = curl(B) on the grid, and then
-            // interpolates that grid J to the particles.  Therefore Entity should
-            // not use init.jx1/2/3 here.  It should use domain.fields.em after
-            // smoothing/communication.
-            //   smoothFieldsInit(domain);
-
-            const real_t sigma = params.template get<real_t>("scales.sigma0");
-            const real_t c_omp = params.template get<real_t>("scales.skindepth0");
-            const real_t Jfac  = math::sqrt(sigma) * c_omp;   // J → β conversion factor
-
-            const auto em_field = domain.fields.em;
-            auto       rpool    = domain.random_pool();
-
-            const real_t x0_loc = mesh.extent(in::x1).first;
-            const real_t x1_loc = mesh.extent(in::x1).second;
-            const real_t y0_loc = mesh.extent(in::x2).first;
-            const real_t y1_loc = mesh.extent(in::x2).second;
-
-            const real_t dx_loc = (x1_loc - x0_loc) / static_cast<real_t>(mesh.n_active(in::x1));
-            const real_t dy_loc = (y1_loc - y0_loc) / static_cast<real_t>(mesh.n_active(in::x2));
-
-            real_t z0_loc = ZERO;
-            real_t dz_loc = ONE;
-
-            //TODO: check this with shock code
-            if constexpr (D == 3) 
+            //  J is read from the *smoothed* grid fields using the same
+            //  one-sided stencil as Tristan's userInitFields:
+            //    jx1 = CORR*CC*(Bz(i,j)   - Bz(i,j-1))
+            //    jx2 = CORR*CC*(Bz(i-1,j) - Bz(i,j))
+            //    jx3 = CORR*CC*(Bx(i,j-1) - Bx(i,j) - By(i-1,j) + By(i,j))
+            //  The CORR*CC and sqrt(sigma)*c_omp/CC factors cancel to give
+            //    beta = J * sqrt(sigma) * c_omp  (same as Tristan's beta_x line)
+            //  E×B uses the full |B|^2 denominator and all three components.
+            //  No probabilistic reflection — every particle is boosted.
+            // ================================================================
             {
+                const real_t sigma = params.template get<real_t>("scales.sigma0");
+                const real_t c_omp = params.template get<real_t>("scales.skindepth0");
+                const real_t Jfac  = math::sqrt(sigma) * c_omp;
+
+                const auto em_field = domain.fields.em;
+
+                const real_t x0_loc = mesh.extent(in::x1).first;
+                const real_t x1_loc = mesh.extent(in::x1).second;
+                const real_t y0_loc = mesh.extent(in::x2).first;
+                const real_t y1_loc = mesh.extent(in::x2).second;
+                const real_t z0_loc = mesh.extent(in::x3).first;
                 const real_t z1_loc = mesh.extent(in::x3).second;
-                z0_loc = mesh.extent(in::x3).first;
-                dz_loc = (z1_loc - z0_loc) / static_cast<real_t>(mesh.n_active(in::x3));
-            }
 
-            const auto init = init_flds;
+                const real_t dx_loc = (x1_loc - x0_loc) / static_cast<real_t>(mesh.n_active(in::x1));
+                const real_t dy_loc = (y1_loc - y0_loc) / static_cast<real_t>(mesh.n_active(in::x2));
+                const real_t dz_loc = (z1_loc - z0_loc) / static_cast<real_t>(mesh.n_active(in::x3));
 
-            for (auto s = 0u; s < domain.species.size(); ++s) 
-            {
-                auto& sp      = domain.species[s];
-                const real_t q = sp.charge();   // +1 (positron) or −1 (electron)
+                const auto init = init_flds;
 
-                const auto& i1  = sp.i1;
-                const auto& i2  = sp.i2;
-                const auto& i3  = sp.i3;
-                const auto& dx1 = sp.dx1;
-                const auto& dx2 = sp.dx2;
-                const auto& dx3 = sp.dx3;
-                const auto& tag = sp.tag;
-                auto        ux1 = sp.ux1;
-                auto        ux2 = sp.ux2;
-                auto        ux3 = sp.ux3;
-
-                Kokkos::parallel_for("FluxTubeDrift", sp.rangeActiveParticles(), KOKKOS_LAMBDA(index_t p) 
+                for (auto s = 0u; s < domain.species.size(); ++s)
                 {
-                    if (tag(p) == ParticleTag::dead)
-                    return;
+                    auto& sp       = domain.species[s];
+                    const real_t q = sp.charge();
 
-                    const auto ii = i1(p);
-                    const auto jj = i2(p);
-                    const auto kk = i3(p);
+                    const auto& i1  = sp.i1;
+                    const auto& i2  = sp.i2;
+                    const auto& i3  = sp.i3;
+                    const auto& dx1 = sp.dx1;
+                    const auto& dx2 = sp.dx2;
+                    const auto& dx3 = sp.dx3;
+                    const auto& tag = sp.tag;
+                    auto        ux1 = sp.ux1;
+                    auto        ux2 = sp.ux2;
+                    auto        ux3 = sp.ux3;
 
-                    const real_t fx = static_cast<real_t>(dx1(p));
-                    const real_t fy = static_cast<real_t>(dx2(p));
-                    const real_t fz = static_cast<real_t>(dx3(p));
+                    Kokkos::parallel_for(
+                        "FluxTubeDrift",
+                        sp.rangeActiveParticles(),
+                        KOKKOS_LAMBDA(index_t p)
+                    {
+                        if (tag(p) == ParticleTag::dead)
+                            return;
 
-                    coord_t<D> xp { ZERO, ZERO, ZERO };
+                        const auto ii = i1(p);
+                        const auto jj = i2(p);
+                        const auto kk = i3(p);
 
-                    xp[0] = x0_loc + (static_cast<real_t>(ii) + fx) * dx_loc;
-                    xp[1] = y0_loc + (static_cast<real_t>(jj) + fy) * dy_loc;
+                        const real_t fx = static_cast<real_t>(dx1(p));
+                        const real_t fy = static_cast<real_t>(dx2(p));
+                        const real_t fz = static_cast<real_t>(dx3(p));
 
-                    if constexpr (D == 3)
+                        // Physical position (needed for analytic E and B)
+                        coord_t<D> xp { ZERO, ZERO, ZERO };
+                        xp[0] = x0_loc + (static_cast<real_t>(ii) + fx) * dx_loc;
+                        xp[1] = y0_loc + (static_cast<real_t>(jj) + fy) * dy_loc;
                         xp[2] = z0_loc + (static_cast<real_t>(kk) + fz) * dz_loc;
 
-                    real_t beta_x = q * Jfac * init.jx1(xp);
-                    real_t beta_y = q * Jfac * init.jx2(xp);
-                    real_t beta_z = q * Jfac * init.jx3(xp);
+                        // ---- J from smoothed grid (Tristan one-sided stencil) ----
+                        // jx1 = (Bz(i,j) - Bz(i,j-1)) / dy
+                        // jx2 = (Bz(i-1,j) - Bz(i,j)) / dx
+                        // jx3 = (Bx(i,j-1) - Bx(i,j) - By(i-1,j) + By(i,j)) / dx
+                        // Fields are uniform in z so kk is used for all layers.
+                        const real_t Bz_ij   = em_field(ii,   jj,   kk, em::bx3);
+                        const real_t Bz_ijm1 = em_field(ii,   jj-1, kk, em::bx3);
+                        const real_t Bz_im1j = em_field(ii-1, jj,   kk, em::bx3);
+                        const real_t Bx_ijm1 = em_field(ii,   jj-1, kk, em::bx1);
+                        const real_t Bx_ij   = em_field(ii,   jj,   kk, em::bx1);
+                        const real_t By_im1j = em_field(ii-1, jj,   kk, em::bx2);
+                        const real_t By_ij   = em_field(ii,   jj,   kk, em::bx2);
 
-                    const real_t Ex = init.ex1(xp);
-                    const real_t Ez = init.ex3(xp);
-                    const real_t Bx = init.bx1(xp);
-                    const real_t Bz = init.bx3(xp);
-                    const real_t Bsq = Bx * Bx + Bz * Bz;
+                        const real_t jx1_grid = (Bz_ij   - Bz_ijm1)                        / dy_loc;
+                        const real_t jx2_grid = (Bz_im1j - Bz_ij)                          / dx_loc;
+                        const real_t jx3_grid = (Bx_ijm1 - Bx_ij - By_im1j + By_ij)       / dx_loc;
 
-                    if (Bsq > ZERO)
-                        beta_y += (Ez * Bx - Ex * Bz) / Bsq;
+                        real_t beta_x = q * Jfac * jx1_grid;
+                        real_t beta_y = q * Jfac * jx2_grid;
+                        real_t beta_z = q * Jfac * jx3_grid;
 
-                    real_t beta_sq = beta_x*beta_x + beta_y*beta_y + beta_z*beta_z;
+                        // ---- E×B drift — full 3-component, full |B|² denominator ----
+                        // E field from analytic formula (init_flds); B also analytic
+                        // so that the ExB drift is consistent with the initial kick.
+                        // Ey = 0 always for this setup.
+                        const real_t Ex  = init.ex1(xp);
+                        const real_t Ez  = init.ex3(xp);
+                        const real_t Bx  = init.bx1(xp);
+                        const real_t By  = init.bx2(xp);
+                        const real_t Bz  = init.bx3(xp);
+                        const real_t Bsq = Bx*Bx + By*By + Bz*Bz;
 
-                    if (beta_sq <= ZERO)
-                    return;
+                        if (Bsq > ZERO) {
+                            beta_x += (-Ez * By)           / Bsq;
+                            beta_y += ( Ez * Bx - Ex * Bz) / Bsq;
+                            beta_z += ( Ex * By)            / Bsq;
+                        }
 
-                    constexpr real_t BETA_MAX    = static_cast<real_t>(0.99);
-                    constexpr real_t BETA_MAX_SQ = BETA_MAX * BETA_MAX;
-                    if (beta_sq >= BETA_MAX_SQ) {
-                    const real_t fac = BETA_MAX / math::sqrt(beta_sq);
-                    beta_x *= fac;
-                    beta_y *= fac;
-                    beta_z *= fac;
-                    beta_sq = BETA_MAX_SQ;
-                    }
+                        real_t beta_sq = beta_x*beta_x + beta_y*beta_y + beta_z*beta_z;
 
-                    // ---- Probabilistic reflection (Tristan trick) ----
-                    real_t ux  = ux1(p);
-                    real_t uy  = ux2(p);
-                    real_t uz  = ux3(p);
-                    real_t gam = math::sqrt(ONE + ux*ux + uy*uy + uz*uz);
+                        if (beta_sq <= ZERO)
+                            return;
 
-                    const real_t beta_dot_u = ux*beta_x + uy*beta_y + uz*beta_z;
+                        // Safety clamp — should never fire for reasonable parameters
+                        constexpr real_t BETA_MAX    = static_cast<real_t>(0.99);
+                        constexpr real_t BETA_MAX_SQ = BETA_MAX * BETA_MAX;
+                        if (beta_sq >= BETA_MAX_SQ) {
+                            const real_t fac = BETA_MAX / math::sqrt(beta_sq);
+                            beta_x *= fac;
+                            beta_y *= fac;
+                            beta_z *= fac;
+                            beta_sq = BETA_MAX_SQ;
+                        }
 
-                    auto gen = rpool.get_state();
-                    const real_t rnd = Kokkos::rand<decltype(gen), real_t>::draw(gen);
-                    rpool.free_state(gen);
+                        // ---- Deterministic Lorentz boost — no probabilistic reflection ----
+                        const real_t ux  = ux1(p);
+                        const real_t uy  = ux2(p);
+                        const real_t uz  = ux3(p);
+                        const real_t gam = math::sqrt(ONE + ux*ux + uy*uy + uz*uz);
 
-                    if (-beta_dot_u / gam > rnd) {
-                    const real_t inv_bsq = ONE / beta_sq;
-                    ux -= static_cast<real_t>(2) * beta_dot_u * beta_x * inv_bsq;
-                    uy -= static_cast<real_t>(2) * beta_dot_u * beta_y * inv_bsq;
-                    uz -= static_cast<real_t>(2) * beta_dot_u * beta_z * inv_bsq;
-                    gam = math::sqrt(ONE + ux*ux + uy*uy + uz*uz);
-                    }
+                        const real_t gam_b = ONE / math::sqrt(ONE - beta_sq);
+                        const real_t ux_b  = gam_b * beta_x;
+                        const real_t uy_b  = gam_b * beta_y;
+                        const real_t uz_b  = gam_b * beta_z;
 
-                    // ---- Lorentz boost into the drift frame ----
-                    const real_t gam_b = ONE / math::sqrt(ONE - beta_sq);
-                    const real_t ux_b  = gam_b * beta_x;
-                    const real_t uy_b  = gam_b * beta_y;
-                    const real_t uz_b  = gam_b * beta_z;
+                        const real_t boost =
+                            (ux*ux_b + uy*uy_b + uz*uz_b) / (gam_b + ONE) + gam;
 
-                    const real_t boost = (ux*ux_b + uy*uy_b + uz*uz_b) / (gam_b + ONE) + gam;
-
-                    ux1(p) = ux + boost * ux_b;
-                    ux2(p) = uy + boost * uy_b;
-                    ux3(p) = uz + boost * uz_b;
-                });
+                        ux1(p) = ux + boost * ux_b;
+                        ux2(p) = uy + boost * uy_b;
+                        ux3(p) = uz + boost * uz_b;
+                    });
+                }
             }
-
-      // ---- Stage 3: charge-density weight correction ----
-      //
-      // Tristan builds lg_arr from grid Ex using lg_arr(i,j) = ex(i,j) - ex(i-1,j),
-      // then bilinearly interpolates lg_arr to the particle position before modifying weights.
-    //   if (init_rho) {
-    //     const real_t rho_fac = math::sqrt(sigma) * c_omp;
-    //     // const auto em_field_rho = domain.fields.em;
-
-    //     for (auto s = 0u; s < domain.species.size(); ++s) {
-    //       auto& sp      = domain.species[s];
-    //       const real_t q = sp.charge();
-
-    //       const auto& i1  = sp.i1;
-    //       const auto& i2  = sp.i2;
-    //       const auto& i3  = sp.i3;
-    //       const auto& dx1 = sp.dx1;
-    //       const auto& dx2 = sp.dx2;
-    //       const auto& tag = sp.tag;
-    //       auto        wgt = sp.weight;
-
-    //       Kokkos::parallel_for(
-    //         "FluxTubeRho",
-    //         sp.rangeActiveParticles(),
-    //         KOKKOS_LAMBDA(index_t p) {
-    //           if (tag(p) == ParticleTag::dead)
-    //             return;
-
-    //           const auto ii = i1(p);
-    //           const auto jj = i2(p);
-    //           const auto kk = i3(p);
-
-    //           const real_t fx = static_cast<real_t>(dx1(p));
-    //           const real_t fy = static_cast<real_t>(dx2(p));
-    //           const real_t w00 = (ONE - fx) * (ONE - fy);
-    //           const real_t w10 = fx * (ONE - fy);
-    //           const real_t w01 = (ONE - fx) * fy;
-    //           const real_t w11 = fx * fy;
-
-    //           const real_t rho00 = em_field_rho(ii, jj, kk, em::ex1) - em_field_rho(ii - 1, jj, kk, em::ex1);
-    //           const real_t rho10 = em_field_rho(ii + 1, jj, kk, em::ex1) - em_field_rho(ii, jj, kk, em::ex1);
-    //           const real_t rho01 = em_field_rho(ii, jj + 1, kk, em::ex1) - em_field_rho(ii - 1, jj + 1, kk, em::ex1);
-    //           const real_t rho11 = em_field_rho(ii + 1, jj + 1, kk, em::ex1) - em_field_rho(ii, jj + 1, kk, em::ex1);
-
-    //           const real_t rho0 = w00 * rho00 + w10 * rho10 + w01 * rho01 + w11 * rho11;
-
-    //           const real_t w_old = wgt(p);
-    //           const real_t dw    = rho0 * rho_fac * q;
-    //           const real_t w_new = w_old + dw;
-
-    //           if (math::abs(dw) > static_cast<real_t>(1000))
-    //             return;
-
-    //           if (w_new <= ZERO)
-    //             return;
-
-    //           wgt(p) = w_new;
-    //         });
-    //     }
-    //   }
-    // }
-
-      // ---- Stage 3 [optional]: charge-density weight correction (init_rho) ----
-      //
-      // In Tristan, the tiny charge density ρ₀ = div(E) ≈ ∂Ex/∂x is computed
-      // from the (smoothed) field arrays and used to perturb particle weights:
-      //   w_new = w + ρ₀ · √σ · d_e · sign(q)
-      //
-      // This seeds the electrostatic charge perturbation that must balance the
-      // curl-free part of the electric field, preventing a transient burst of
-      // plasma oscillations at t = 0.
-      //
-      // Here we compute ρ₀ analytically from InitFields.ex1 using a centred
-      // finite difference ∂Ex/∂x ≈ [ex1(x+dx/2) − ex1(x−dx/2)] / dx.
-    //   if (init_rho) {
-    //     const real_t rho_fac = math::sqrt(sigma) * c_omp;  // ρ → Δw factor
-    //     const real_t hdx     = HALF * init_flds.dx;
-
-    //     for (auto s = 0u; s < domain.species.size(); ++s) {
-    //       auto& sp       = domain.species[s];
-    //       const real_t q = sp.charge();
-
-    //       const auto& i1  = sp.i1;
-    //       const auto& i2  = sp.i2;
-    //       const auto& i3  = sp.i3;
-    //       const auto& dx1 = sp.dx1;
-    //       const auto& dx2 = sp.dx2;
-    //       const auto& dx3 = sp.dx3;
-    //       const auto& tag = sp.tag;
-    //       auto        wgt = sp.weight;
-
-    //       Kokkos::parallel_for(
-    //         "FluxTubeRho",
-    //         sp.rangeActiveParticles(),
-    //         KOKKOS_LAMBDA(index_t p) {
-    //           if (tag(p) == ParticleTag::dead)
-    //             return;
-
-    //           coord_t<M::Dim> x_Ph { ZERO };
-    //           x_Ph[0] = mesh.metric.template convert<1, Crd::Cd, Crd::XYZ>(
-    //             static_cast<real_t>(i1(p)) + static_cast<real_t>(dx1(p)));
-    //           x_Ph[1] = mesh.metric.template convert<2, Crd::Cd, Crd::XYZ>(
-    //             static_cast<real_t>(i2(p)) + static_cast<real_t>(dx2(p)));
-    //           x_Ph[2] = mesh.metric.template convert<3, Crd::Cd, Crd::XYZ>(
-    //             static_cast<real_t>(i3(p)) + static_cast<real_t>(dx3(p)));
-
-    //           // ∂Ex/∂x centred finite difference
-    //           coord_t<M::Dim> xp { ZERO, ZERO, ZERO }, xm { ZERO, ZERO, ZERO };
-    //           xp[0] = x_Ph[0];
-    //           xp[1] = x_Ph[1];
-    //           xp[2] = x_Ph[2];
-    //           xm[0] = x_Ph[0];
-    //           xm[1] = x_Ph[1];
-    //           xm[2] = x_Ph[2];
-    //           xp[0] += hdx;
-    //           xm[0] -= hdx;
-    //           const real_t rho0 = (init.ex1(xp) - init.ex1(xm)) / init.dx;
-
-    //           // Perturb weight.  Safety bounds matching Tristan's 1000-threshold.
-    //           const real_t w_old = wgt(p);
-    //           const real_t dw    = rho0 * rho_fac * q;
-    //           const real_t w_new = w_old + dw;
-
-    //           if (math::abs(dw) > static_cast<real_t>(1000))
-    //             return;   // ignore pathological cells (e.g. at a sharp boundary)
-    //           if (w_new <= ZERO)
-    //             return;   // never allow negative weights
-
-    //           wgt(p) = w_new;
-    //         });
-        // }
-    //   }
-        }   //! InitPrtls
+        } //! InitPrtls
 
     // -----------------------------------------------------------------------
     //  (Optional) CustomPostStep — nothing to do here; evolution is fully PIC.

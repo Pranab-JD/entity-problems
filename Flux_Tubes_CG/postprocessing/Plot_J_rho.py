@@ -102,7 +102,7 @@ for fname in files_local:
         vmin, vmax = field_limits[title]
 
         im = ax.imshow(data, origin="lower", aspect="equal", extent=[x.min(), x.max(), y.min(), y.max()], 
-                             cmap="hot", vmin=vmin, vmax=vmax)
+                             cmap="seismic", vmin=vmin, vmax=vmax)
         
         ax.set_title(title)
         ax.tick_params(axis="both", which="major", labelsize=10, length=6)
