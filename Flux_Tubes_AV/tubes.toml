@@ -1,0 +1,87 @@
+[simulation]
+    name    = "/scratch/project_465002528/pjd/flux_tubes_AV/tubes"
+    engine  = "srpic"
+    runtime = 200.0           #* t_max [ωpe⁻¹]
+
+    [simulation.domain]
+        decomposition = [-1, -1]
+
+###! GRID
+[grid]
+    #* Lx = 4π·L = 4π·64 ≈ 804 dₑ  (2 islands)
+    #* Ly = Lx/2 ≈ 402 dₑ  (PEC walls at ±201 dₑ)
+    #* dx = Lx/nx = 0.25 dₑ  (~4 cells/dₑ)
+    resolution = [3200, 1600]
+    extent     = [[0.0, 804.0], [-201.0, 201.0]]
+
+    [grid.metric]
+        metric = "minkowski"
+
+    [grid.boundaries]
+        fields    = [["PERIODIC"], ["CONDUCTOR", "CONDUCTOR"]]
+        particles = [["PERIODIC"], ["REFLECT",   "REFLECT"  ]]
+
+###! ALGORITHMS
+[algorithms]
+    current_filters = 4
+
+    [algorithms.timestep]
+        CFL = 0.45
+
+###! PARTICLES
+[particles]
+    ppc0 = 128.0
+
+    [[particles.species]]
+        label    = "e-"
+        mass     = 1.0
+        charge   = -1.0
+        maxnpart = 1e8   #* ppc0 × (nx × ny) / nproc
+
+    [[particles.species]]
+        label    = "e+"
+        mass     = 1.0
+        charge   = 1.0
+        maxnpart = 1e8
+
+###! SCALES
+[scales]
+    sigma0     = 25.0    # σ₀ = (ωce/ωpe)²
+    skindepth0 = 1.0     # dₑ = c/ωpe  [code units];  1 dₑ = 4 cells
+    larmor0    = 0.12    # rL = √T · (ωpe/ωce) · dₑ = √0.36 × 0.2 × 1.0
+
+###! Setup
+[setup]
+    b0      = 1.0    # asymptotic field strength  [normalised]
+    bg      = 0.0    # guide-field ratio  Bz∞/b0
+    eps     = 0.4    # Fadeev island parameter  ε ∈ (0,1);  ε=0 → Harris sheet
+    sheet_L = 64.0   # current-layer half-thickness L  [dₑ];  Lx = 4π·L
+
+    # perturbation amplitudes from ∇·B = 0:
+    #   δBy = dby_frac · b0
+    #   δBx = −dby_frac · b0 · Lx / (2·Ly)
+    dby_frac    = -0.1    # |δBy| / b0
+
+    temperature = 0.36   # kT / (mₑc²)
+
+###! OUTPUT
+[output]
+    interval = 100
+    format   = "BPFile"
+
+    [output.fields]
+        quantities = ["N", "B", "E", "J"]
+
+    [output.particles]
+        enable = false
+
+    [output.spectra]
+        enable = false
+
+[diagnostics]
+    interval  = 500
+    log_level = "WARNING"
+
+[checkpoint]
+    interval = 10000
+    keep     = 1
