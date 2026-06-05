@@ -1,7 +1,7 @@
 [simulation]
-    name    = "/scratch/project_465002528/pjd/flux_tubes_AV/tubes"
+    name    = "/scratch/project_465002528/pjd/flux_tubes_AV/L_804_201_dBy0.1/tubes"
     engine  = "srpic"
-    runtime = 200.0           #* t_max [ωpe⁻¹]
+    runtime = 1000.0           #* t_max [ωpe⁻¹]
 
     [simulation.domain]
         decomposition = [-1, -1]
@@ -46,23 +46,23 @@
 
 ###! SCALES
 [scales]
-    sigma0     = 25.0    # σ₀ = (ωce/ωpe)²
-    skindepth0 = 1.0     # dₑ = c/ωpe  [code units];  1 dₑ = 4 cells
-    larmor0    = 0.12    # rL = √T · (ωpe/ωce) · dₑ = √0.36 × 0.2 × 1.0
+    sigma0     = 25.0    # σ = (ωce/ωpe)²
+    skindepth0 = 1.0     # d = c/ωpe  [code units];  1 d = 4 cells
+    larmor0    = 0.12    # rL = √T · (ωpe/ωce) · d = √0.36 × 0.2 × 1.0
 
 ###! Setup
 [setup]
     b0      = 1.0    # asymptotic field strength  [normalised]
-    bg      = 0.0    # guide-field ratio  Bz∞/b0
+    bg      = 0.0    # guide-field ratio  Bz/b0
     eps     = 0.4    # Fadeev island parameter  ε ∈ (0,1);  ε=0 → Harris sheet
-    sheet_L = 64.0   # current-layer half-thickness L  [dₑ];  Lx = 4π·L
+    sheet_L = 64.0   # current-layer half-thickness L  [d];  Lx = 4π·L
 
     # perturbation amplitudes from ∇·B = 0:
     #   δBy = dby_frac · b0
     #   δBx = −dby_frac · b0 · Lx / (2·Ly)
-    dby_frac    = -0.1    # |δBy| / b0
+    dby_frac    = -0.1    # |δBy| / b0 (DEFAULT = -0.1)
 
-    temperature = 0.36   # kT / (mₑc²)
+    temperature = 0.36   # kT / (mc²)
 
 ###! OUTPUT
 [output]

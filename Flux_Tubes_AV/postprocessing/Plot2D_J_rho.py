@@ -79,38 +79,69 @@ for fname in files_local:
 
         J_mag = np.sqrt(Jx**2 + Jy**2 + Jz**2)
 
-    #! ========================================================
-    #! Plot
-    #! ========================================================
-    fig, axs = plt.subplots(2, 3, figsize=(10, 6))
+        #! ========================================================
+        #! Plot
+        #! ========================================================
+        fig, axs = plt.subplots(2, 3, figsize=(16, 6))
 
-    field_limits = {"Jx": (-1.0, 1.0), "Jy": (-1.0, 1.0), "Jz": (-2.0, 2.0), 
-                    "|J|": (0.0, 2.5), "rho": (0.0, 4.0)}
+        field_limits = {
+            "Jx":  None,
+            "Jy":  None,
+            "Jz":  None,
+            "|J|": None,
+            "rho": None,
+        }
 
-    fields = [(Jx, "Jx"), (Jy, "Jy"), (Jz, "Jz"), (J_mag, "|J|"), (rho, "rho")]
+        cmaps = {
+            "Jx":  "seismic",
+            "Jy":  "seismic",
+            "Jz":  "seismic",
+            "|J|": "inferno",
+            "rho": "inferno",
+        }
 
-    for ax, (data, title) in zip(axs.flat, fields):
+        fields = [(Jx, "Jx"), (Jy, "Jy"), (Jz, "Jz"), (J_mag, "|J|"), (rho, "rho")]
 
-        vmin, vmax = field_limits[title]
+        for ax, (data, title) in zip(axs.flat, fields):
 
-        im = ax.imshow(data, origin="lower", aspect="equal", extent=[x.min(), x.max(), y.min(), y.max()], 
-                             cmap="seismic", vmin=vmin, vmax=vmax)
-        
-        ax.set_title(title)
-        ax.tick_params(axis="both", which="major", labelsize=10, length=6)
-        ax.tick_params(axis="both", which="minor", labelsize=8, length=3)
-        ax.set_xlabel("X")
-        ax.set_ylabel("Y")
-        
-        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+            limits = field_limits[title]
+            cmap   = cmaps[title]
 
-    fig.tight_layout()
+            if limits is not None:
+                vmin, vmax = limits
+            else:
+                if cmap == "seismic":
+                    vmax = np.percentile(np.abs(data), 99)
+                    vmin = -vmax
+                else:
+                    vmin = np.percentile(data, 1)
+                    vmax = np.percentile(data, 99)
 
-    outfile = f"{outdir}/moments_{step_str}.png"
-    fig.savefig(outfile, dpi=150)
-    plt.close(fig)
+            im = ax.imshow(
+                data,
+                origin="lower",
+                aspect="equal",
+                extent=[x.min(), x.max(), y.min(), y.max()],
+                cmap=cmap,
+                vmin=vmin,
+                vmax=vmax,
+            )
 
-    print(f"Saved {outfile}", flush=True)
+            ax.set_title(title)
+            ax.tick_params(axis="both", which="major", labelsize=10, length=6)
+            ax.tick_params(axis="both", which="minor", labelsize=8, length=3)
+            ax.set_xlabel("X")
+            ax.set_ylabel("Y")
+
+            fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+
+        fig.tight_layout()
+
+        outfile = f"{outdir}/moments_{step_str}.png"
+        fig.savefig(outfile, dpi=150)
+        plt.close(fig)
+
+        print(f"Saved {outfile}", flush=True)
 
 #! ============================================================
 #! Sync

@@ -82,39 +82,78 @@ for fname in files_local:
         B_mag = np.sqrt(Bx**2 + By**2 + Bz**2)
         E_mag = np.sqrt(Ex**2 + Ey**2 + Ez**2)
 
-    #! ========================================================
-    #! Plot
-    #! ========================================================
-    fig, axs = plt.subplots(2, 4, figsize=(12, 6))
+        #! ========================================================
+        #! Plot
+        #! ========================================================
+        fig, axs = plt.subplots(2, 4, figsize=(20, 6))
 
-    field_limits = {"Bx": (-0.25, 0.25), "By": (-0.25, 0.25), "Bz": (0.0, 1.0), "|B|": (0.0, 1.5),
-                    "Ex": (-0.25, 0.25), "Ey": (-0.25, 0.25), "Ez": (-0.25, 0.25), "|E|": (0.0, 0.4)}
+        field_limits = {
+            "Bx":  (-0.25, 0.25),
+            "By":  (-0.25, 0.25),
+            "Bz":  (0.0,   1.0),
+            "|B|": (0.8,   1.0),
+            "Ex":  None,
+            "Ey":  None,
+            "Ez":  None,
+            "|E|": None,
+        }
 
-    fields = [(Bx, "Bx"), (By, "By"), (Bz, "Bz"), (B_mag, "|B|"),
-              (Ex, "Ex"), (Ey, "Ey"), (Ez, "Ez"), (E_mag, "|E|")]
+        cmaps = {
+            "Bx":  "seismic",
+            "By":  "seismic",
+            "Bz":  "inferno",
+            "|B|": "inferno",
+            "Ex":  "seismic",
+            "Ey":  "seismic",
+            "Ez":  "seismic",
+            "|E|": "inferno",
+        }
 
-    for ax, (data, title) in zip(axs.flat, fields):
-        
-        vmin, vmax = field_limits[title]
+        fields = [
+            (Bx, "Bx"), (By, "By"), (Bz, "Bz"), (B_mag, "|B|"),
+            (Ex, "Ex"), (Ey, "Ey"), (Ez, "Ez"), (E_mag, "|E|"),
+        ]
 
-        im = ax.imshow(data, origin="lower", aspect="equal", extent=[x.min(), x.max(), y.min(), y.max()],
-                             cmap="seismic", vmin=vmin, vmax=vmax)
+        for ax, (data, title) in zip(axs.flat, fields):
 
-        ax.set_title(title)
-        ax.tick_params(axis="both", which="major", labelsize=10, length=6)
-        ax.tick_params(axis="both", which="minor", labelsize=8, length=3)
-        ax.set_xlabel("X")
-        ax.set_ylabel("Y")
+            limits = field_limits[title]
+            cmap   = cmaps[title]
 
-        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-    
-    fig.tight_layout()
+            if limits is not None:
+                vmin, vmax = limits
+            else:
+                if cmap == "seismic":
+                    vmax = np.percentile(np.abs(data), 99)
+                    vmin = -vmax
+                else:
+                    vmin = np.percentile(data, 1)
+                    vmax = np.percentile(data, 99)
 
-    outfile = f"{outdir}/fields_{step_str}.png"
-    fig.savefig(outfile, dpi=150)
-    plt.close(fig)
+            im = ax.imshow(
+                data,
+                origin="lower",
+                aspect="equal",
+                extent=[x.min(), x.max(), y.min(), y.max()],
+                cmap=cmap,
+                vmin=vmin,
+                vmax=vmax,
+            )
 
-    print(f"Saved {outfile}", flush=True)
+            ax.set_title(title)
+            ax.tick_params(axis="both", which="major", labelsize=10, length=6)
+            ax.tick_params(axis="both", which="minor", labelsize=8, length=3)
+            ax.set_xlabel("X")
+            ax.set_ylabel("Y")
+
+            fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+
+        fig.tight_layout()
+
+        outfile = f"{outdir}/fields_{step_str}.png"
+        fig.savefig(outfile, dpi=150)
+        plt.close(fig)
+
+        print(f"Saved {outfile}", flush=True)
 
 #! ============================================================
 #! Sync
