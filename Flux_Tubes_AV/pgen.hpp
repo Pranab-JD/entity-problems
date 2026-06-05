@@ -3,57 +3,56 @@
 
 /**
  * @file pgen.hpp
- * @brief Entity problem generator for Velberg 2-D island-coalescence reconnection.
- *
+ * @brief Problem generator for Velberg et al (2026) 2D/3D plasmoid/fluxtube coalescence reconnection
  *
  * ─────────────────────────────────────────────────────────────────────────────
- * COORDINATE MAPPING  (VPIC → Entity)
+ *! COORDINATE MAPPING
  *   x  (along sheet)      → x1
  *   y  (normal to sheet)  → x2
  *   z  (out of plane)     → x3   ← guide-field / primary-current direction
  *
- * PHYSICS
+ *! PHYSICS
  *   Fadeev force-free equilibrium (two coalescing islands) for a relativistic
  *   pair plasma (me = mi = 1, σ = 25) without a guide field (bg = 0 by default).
  *   A small symmetry-breaking perturbation seeds island coalescence.
  *
- *   Field structure (D ≡ cosh(x2/L) + ε·cos(x1/L)):
- *     bx1 = b0·sinh(x2/L)/D          [reversing / reconnecting component, X]
- *     bx2 = b0·ε·sin(x1/L)/D         [connecting / streaming component,   Y]
- *     bx3 = b0·√[(1−ε²)/D² + bg²]   [out-of-plane, force-free guide,     Z]
+ *?   Initial Fields (Denom ≡ cosh(x2/L) + ε·cos(x1/L))
+ *     bx1 = b0·sinh(x2/L)/Denom          [reversing / reconnecting component, X]
+ *     bx2 = b0·ε·sin(x1/L)/Denom         [connecting / streaming component,   Y]
+ *     bx3 = b0·√[(1−ε²)/Denom² + bg²]    [out-of-plane, force-free guide,     Z]
  *     ex1 = ex2 = ex3 = 0
  *
- *   Symmetry-breaking perturbation (div-free):
+ *?   Symmetry-breaking perturbation (divergence free):
  *     dby = dby_frac · b0
  *     dbx = −dby · Lx / (2·Ly)
  *     δbx1 += dbx · cos(2π·x1/Lx) · sin(π·x2/Ly)
  *     δbx2 += dby · cos(π·x2/Ly)  · sin(2π·x1/Lx)
  *
- *   Force-free current (J ∥ B, pair-plasma, uniform density n0):
- *     J_x3 = (b0/L)·(1−ε²)/D²                            [primary]
- *     J_x1 = J_x3·sinh(x2/L) / √[(1−ε²)+bg²·D²]         [in-plane]
- *     J_x2 = J_x3·ε·sin(x1/L) / √[(1−ε²)+bg²·D²]
+ *?   Force-free current (J ∥ B, pair-plasma, uniform density n0):
+ *     J_x3 = (b0/L)·(1−ε²)/Denom²                            [primary, out-of-plane]
+ *     J_x1 = J_x3·sinh(x2/L) / √[(1−ε²)+bg²·Denom²]          [in-plane]
+ *     J_x2 = J_x3·ε·sin(x1/L) / √[(1−ε²)+bg²·Denom²]
  *
- *   In Entity normalisation the drift velocity β̂ for each species is
- *     β_ref = √σ₀ · dₑ · (1−ε²) / [2 · L · D²]
- *     β_x   = β_ref · sinh(x2/L) / F,   F = √[(1−ε²)+bg²·D²]
+ *?   In Entity normalisation the drift velocity β̂ for each species is
+ *     β_ref = √σ₀ · dₑ · (1−ε²) / [2 · L · Denom²]
+ *     β_x   = β_ref · sinh(x2/L) / F,   F = √[(1−ε²)+bg²·Denom²]
  *     β_y   = β_ref · ε · sin(x1/L) / F
  *     β_z   = β_ref
  *   Opposite species receive opposite kicks (net charge density = 0).
  *
- * BOUNDARIES
+ *! BOUNDARIES
  *   x1 : PERIODIC  (fields + particles)
- *   x2 : CONDUCTOR / REFLECT  (PEC walls, particles reflect)
+ *   x2 : CONDUCTING / REFLECTING  (Fields conduct, particles reflect)
  *
- * PARAMETERS (all in setup.* or scales.* in the .toml)
- *   b0          normalised asymptotic field strength              [default 1.0]
+ *! PARAMETERS (to be set in the .toml)
+ *   b0          normalised asymptotic field strength             [default 1.0]
  *   bg          guide-field ratio B_guide/b0                     [default 0.0]
  *   eps         Fadeev island parameter (0 < ε < 1)              [default 0.4]
  *   sheet_L     current-layer half-thickness in code units       [required]
- *   temperature kT/(mₑ c²)  (relativistic temperature)          [required]
+ *   temperature kT/(m c²)  (relativistic temperature)            [required]
  *   dby_frac    perturbation amplitude |dBy|/b0                  [default -0.1]
  *   sigma0      magnetisation σ = (ωce/ωpe)²                     [from scales]
- *   skindepth0  electron skin depth dₑ in physical units         [from scales]
+ *   skindepth0  electron skin depth d in physical units          [from scales]
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
@@ -64,10 +63,10 @@
 #include "utils/error.h"
 #include "utils/numeric.h"
 
-#include "archetypes/field_setter.h"
-#include "archetypes/problem_generator.h"
 #include "archetypes/utils.h"
+#include "archetypes/field_setter.h"
 #include "framework/domain/metadomain.h"
+#include "archetypes/problem_generator.h"
 
 #include <utility>
 
@@ -81,28 +80,25 @@ namespace user
     template <Dimension D>
     struct InitFields
     {
-
-        InitFields(
-            real_t b0,
-            real_t bg,
-            real_t eps,
-            real_t sheet_L,
-            real_t Lx,
-            real_t Ly,
-            real_t dby_frac,
-            real_t cs_x,
-            real_t cs_y) :
-            b0      { b0 },
-            bg      { bg },
-            eps     { eps },
-            L       { sheet_L },
-            Lx      { Lx },
-            Ly      { Ly },
-            dby     { dby_frac * b0 },
-            dbx     { -dby_frac * b0 * Lx / (TWO * Ly) },   // from ∇·B = 0
-            cs_x    { cs_x },
-            cs_y    { cs_y }
-        {}
+        InitFields( real_t b0,
+                    real_t bg,
+                    real_t eps,
+                    real_t sheet_L,
+                    real_t Lx,
+                    real_t Ly,
+                    real_t dby_frac,
+                    real_t cs_x,
+                    real_t cs_y) :
+                        b0      { b0 },
+                        bg      { bg },
+                        eps     { eps },
+                        L       { sheet_L },
+                        Lx      { Lx },
+                        Ly      { Ly },
+                        dby     { dby_frac * b0 },
+                        dbx     { -dby_frac * b0 * Lx / (TWO * Ly) },   // from ∇·B = 0
+                        cs_x    { cs_x },
+                        cs_y    { cs_y } {}
 
         Inline auto Fadeev_denominator(const coord_t<D>& x) const -> real_t
         {
@@ -149,6 +145,25 @@ namespace user
 
     private:
         const real_t b0, bg, eps, L, Lx, Ly, dby, dbx, cs_x, cs_y;
+        
+        // eps     : Fadeev island parameter ε ∈ (0, 1)
+        //           ε = 0 → Harris sheet (no islands)
+        //           ε → 1 → maximally modulated islands
+        //           controls island size relative to sheet thickness L
+        // L       : current-layer half-thickness [code units = d]
+        //           sets the spatial scale of the equilibrium;
+        //           field and current gradients ~ 1/L
+        // Lx, Ly  : physical box dimensions [code units]
+        //           Lx = 4π·L for exactly 2 islands (periodic in x)
+        //           Ly = Lx/2, sets distance to PEC walls
+        // dby     : absolute perturbation amplitude δBy = dby_frac · b0
+        //           breaks translational symmetry along x, seeds island coalescence
+        // dbx     : perturbation amplitude δBx, derived from ∇·B = 0:
+        //           dbx = −dby · Lx / (2·Ly); ensures the perturbation is divergence-free
+        // cs_x    : x-coordinate of the box centre = (xmax + xmin) / 2
+        //           shifts the equilibrium from the origin to the grid centre
+        // cs_y    : y-coordinate of the box centre = (ymax + ymin) / 2
+        //           current sheet sits at y = cs_y (= 0 for a symmetric grid)
     };
 
     //! ==========================================================
@@ -181,22 +196,22 @@ namespace user
         Metadomain<S, M>& global_domain;
 
         //* Domain geometry
-        const real_t global_xmin, global_xmax;   // x1 range
-        const real_t global_ymin, global_ymax;   // x2 range
-        const real_t Lx, Ly;                     // box dimensions
-        const real_t cs_x, cs_y;                 // box centre
+        const real_t global_xmin, global_xmax;      // x1 range
+        const real_t global_ymin, global_ymax;      // x2 range
+        const real_t Lx, Ly;                        // box dimensions
+        const real_t cs_x, cs_y;                    // box centre
 
         //* Physics parameters
-        const real_t b0;           // normalised asymptotic field strength
-        const real_t bg;           // guide-field ratio B_guide / b0
-        const real_t eps;          // Fadeev island parameter  (0 < ε < 1)
-        const real_t sheet_L;      // current-layer half-thickness  [code units = dₑ]
-        const real_t temperature;  // kT / (mₑ c²) — relativistic temperature
-        const real_t dby_frac;     // perturbation amplitude  |δBy| / b0
+        const real_t b0;                            // normalised asymptotic field strength
+        const real_t bg;                            // guide-field ratio: B_guide / b0
+        const real_t eps;                           // Fadeev island parameter  (0 < ε < 1)
+        const real_t sheet_L;                       // current-layer half-thickness  [code units = d]
+        const real_t temperature;                   // kT / (mc²) — relativistic temperature
+        const real_t dby_frac;                      // perturbation amplitude  |δBy| / b0
 
         //* Normalisation scales
-        const real_t sigma0;       // σ₀ = (ωce/ωpe)²
-        const real_t skindepth0;   // dₑ in physical (code) units
+        const real_t sigma0;                        // σ = (ωce/ωpe)²
+        const real_t skindepth0;                    // d (plasma skin depth) in physical (code) units
 
         InitFields<D> init_flds;
 
@@ -225,25 +240,23 @@ namespace user
 
         inline PGen() {}
 
-        // ── Field initialisation (called at t = 0) ────────────────────────────
+        //? Field initialisation (called at t = 0)
         auto MatchFields(real_t) const -> InitFields<D> { return init_flds; }
 
-        // ── Particle initialisation ───────────────────────────────────────────
+        //? Particle initialisation
         inline void InitPrtls(Domain<S, M>& domain)
         {
-
-            // ──────────────────────────────────────────────────────────────────
-            // Step 1 — Inject a uniform relativistic Maxwellian plasma.
-            //
-            // For a force-free current sheet the pressure balance is magnetic,
-            // so the particle density can be uniform (no sech² profile needed),
-            // exactly as in the VPIC Velberg_2D.cc deck.
-            // Both species start with zero bulk drift; drifts are added in Step 2.
-            // ──────────────────────────────────────────────────────────────────
+            //* ──────────────────────────────────────────────────────────────────
+            //* Step 1 — Inject a uniform relativistic Maxwellian plasma.
+            //*
+            //* For a force-free current sheet, the pressure balance is magnetic,
+            //* so the particle density can be uniform (no sech² profile needed),
+            //* exactly as in the VPIC.
+            //* Both species start with zero bulk drift; drifts are added in Step 2.
+            //* ──────────────────────────────────────────────────────────────────
+            
             const auto temperatures = std::make_pair(temperature, temperature);
-            const auto zero_drifts  = std::make_pair(
-                std::vector<real_t> { ZERO, ZERO, ZERO },
-                std::vector<real_t> { ZERO, ZERO, ZERO });
+            const auto zero_drifts  = std::make_pair(std::vector<real_t> { ZERO, ZERO, ZERO }, std::vector<real_t> { ZERO, ZERO, ZERO });
 
             boundaries_t<real_t> full_box;
             for (auto d { 0u }; d < (unsigned int)M::Dim; ++d)
@@ -251,30 +264,30 @@ namespace user
 
             arch::InjectUniformMaxwellians<S, M>(params, domain, ONE, temperatures, { 1, 2 }, zero_drifts, false, full_box);
 
-            // ──────────────────────────────────────────────────────────────────
-            // Step 2 — Apply the force-free current drift to each species.
-            //
-            // The Fadeev equilibrium requires J ∥ B everywhere (force-free
-            // condition), giving three non-zero current components
-            // (↔ VPIC JX, JY, JZ macros):
-            //
-            //   J_x3 = (b0/L)(1−ε²)/D²                     [primary, out-of-plane Z]
-            //   J_x1 = J_x3 · sinh(x2/L) / F,   F = √[(1−ε²)+bg²D²]
-            //   J_x2 = J_x3 · ε·sin(x1/L) / F
-            //
-            // In Entity normalisations (β = drift speed / c):
-            //   β_ref = √σ₀ · dₑ · (1−ε²) / [2·L·D²]
-            //           ↑ factor 2: pair plasma, each species carries half the current
-            //           (analogous to VPIC's  VDY = −JY/2  for both-species current)
-            //   β_x   = β_ref · sinh(x2/L) / F
-            //   β_y   = β_ref · ε·sin(x1/L) / F
-            //   β_z   = β_ref
-            //
-            // Because VD ≪ vth (β_ref ~ 0.003 for fiducial parameters), the
-            // simple momentum-kick approximation  u += q₀·β·γ  is accurate to
-            // O(β²/vth²), which is identical to the boost employed in the VPIC
-            // deck.
-            // ──────────────────────────────────────────────────────────────────
+            //* ──────────────────────────────────────────────────────────────────
+            //* Step 2 — Apply the force-free current drift to each species.
+            //*
+            //* The Fadeev equilibrium requires J ∥ B everywhere (force-free
+            //* condition), giving three non-zero current components
+            //* (↔ VPIC JX, JY, JZ macros):
+            //*
+            //*   J_x3 = (b0/L)(1−ε²)/D²                     [primary, out-of-plane Z]
+            //*   J_x1 = J_x3 · sinh(x2/L) / F,   F = √[(1−ε²)+bg²D²]
+            //*   J_x2 = J_x3 · ε· sin(x1/L) / F
+            //*
+            //* In Entity normalisations (β = drift speed / c):
+            //*   β_ref = √σ · d · (1−ε²) / [2·L·D²]
+            //*                              ↑ factor 2: pair plasma, each species carries half the current
+            //*                              (analogous to VPIC's  VDY = −JY/2  for both-species current)
+            //*   β_x   = β_ref · sinh(x2/L) / F
+            //*   β_y   = β_ref · ε· sin(x1/L) / F
+            //*   β_z   = β_ref
+            //*
+            //* Because drift velocity ≪ vth (β_ref ~ 0.003 for fiducial parameters), the
+            //* simple momentum-kick approximation  u += q₀·β·γ  is accurate to
+            //* O(β²/vth²), which is identical to the boost employed in the VPIC deck.
+            //* ──────────────────────────────────────────────────────────────────
+            
             const auto& mesh = domain.mesh;
 
             // Capture scalars for GPU kernels
@@ -285,7 +298,7 @@ namespace user
             const real_t cs_x_   = cs_x;
             const real_t cs_y_   = cs_y;
             const real_t sigma0_ = sigma0;
-            const real_t d0_     = skindepth0;   // dₑ in code units
+            const real_t d0_     = skindepth0;   // d in code units
 
             for (auto s { 0u }; s < 2; ++s) 
             {
@@ -327,7 +340,7 @@ namespace user
                     //? Component decomposition along J ∥ B direction
                     const real_t beta_x = beta_ref * math::sinh(dy / L_) / F;
                     const real_t beta_y = beta_ref * eps_ * math::sin(dx / L_) / F;
-                    const real_t beta_z = beta_ref;   // dominant (out-of-plane Z) component
+                    const real_t beta_z = beta_ref;
 
                     //? Lorentz factor of the drift
                     const real_t beta_sq = beta_x * beta_x + beta_y * beta_y + beta_z * beta_z;
@@ -345,9 +358,6 @@ namespace user
                 });
             }
         }
-
-        // ── No post-step replenishment: closed periodic/PEC box ──────────────
-        // void CustomPostStep(timestep_t, simtime_t, Domain<S, M>&) {}
     };
 
 } // namespace user
