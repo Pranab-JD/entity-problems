@@ -2,10 +2,15 @@
 #define PROBLEM_GENERATOR_H
 
 /**
- * @file fluxtube.hpp
- * @brief Force-free Lundquist flux-tube collision — Entity port of Tristan user_sheet_new.F90
+ * @file Flux_Tubes_CG/pgen.hpp
+ * @brief Force-free 2D/3D Lundquist flux-tube collision 
  *
- * Physics setup
+ *~ References:
+ *      1. Lyutikov et al. (2017), JPP, 83, 635830602
+ *      2. Ripperda et al. (2019), MNRAS, 485, 299
+ *      3. Granier  et al. (2025), ApJ, 992, 193
+ *
+ *~ Physics setup
  * -------------
  * Two Lundquist tubes (Bessel-function force-free equilibria) are initialised
  * side-by-side along X (tangent at the domain centre) and given opposite
@@ -15,12 +20,12 @@
  *   Tube 1 = LEFT  (kicked +x, toward centre)
  *   Tube 2 = RIGHT (kicked -x, toward centre)
  *
- * Field definitions (Tristan user_sheet_new.F90, userInitFields)
+ *~ Field initialisation
  * --------------------------------------------------------------
  *   Az(r) = (tube_radius / alpha_t) * J0(alpha_t * r/tube_radius)   r <  tube_radius
  *   Az(r) = (tube_radius / alpha_t) * J0(alpha_t)                   r >= tube_radius
  *
- *   Bx =  dAz/dy          (Tristan: discrete per-cell difference of Az)
+ *   Bx =  dAz/dy
  *   By = -dAz/dx
  *   Bz =  sqrt( J0(alpha_t * r/tube_radius)^2 + guide_field_floor )
  *
@@ -30,74 +35,30 @@
  *     tube 2 (v = -kick*x_hat, toward centre):  Ex = 0,  Ey = -kick*Bz,  Ez = +kick*By
  *     (E = -v x B; signs chosen so ExB drift CONVERGES the tubes.)
  *     E = 0 outside both tubes.
- *   (NOTE: this differs from the previous top-bottom/Y-kick layout, where the
- *    nonzero motional components were Ex and Ez with By replaced by Bx.)
  *
  *   Force-free current J = curl(B), written analytically (cylindrical):
  *     Jz   = (alpha_t / tube_radius) * J0(alpha_t * r/tube_radius)
  *     Jphi = (alpha_t / tube_radius) * J0 * J1 / Bz        ( = -dBz/dr )
- *   (J is radially symmetric and unchanged by the layout; only the centres
- *    move and only the kick direction changes.)
+ *   (J is radially symmetric)
  *
- * Current/drift normalisation  (THE key cross-code conversion)
+ *~ Current/drift normalisation
  * ------------------------------------------------------------
- *     drift_velocity = J * sqrt(sigma) * skindepth * sign(q)   [density param = 1]
- *   (No factor 1/2 — calibrated against Tristan, 1.hpp, 2.hpp. See manual #1.)
+ *     drift_velocity = J * sqrt(sigma) * skindepth * sign(q)
  *
- * Particle initialisation — mirrors Tristan userInitParticles
+ *~ Particle initialisation
  * -----------------------------------------------------------
  *  1. Uniform thermal Maxwellian everywhere.
- *  2. drift = sign(q) * sqrt(sigma) * skindepth * J(analytic)
- *           + ExB term. For an X-kick the DRIVEN drift is along x:
- *             drift_x += (E x B)_x / (By^2 + Bz^2)
- *                      = (Ey*Bz - Ez*By) / (By^2 + Bz^2)
- *     (Tristan-style denominator: the two in-plane-perp + guide components,
- *      i.e. By^2 + Bz^2 here, mirroring Bx^2 + Bz^2 in the Y-kick layout.
- *      >>> MANUAL CHECK #10 — this denominator is by symmetry, not a Tristan
- *      reference that runs tubes along X. <<<)
+ *  2. drift = sign(q) * sqrt(sigma) * skindepth * J(analytic) + ExB term. 
+ *     For an X-kick the DRIVEN drift is along x:
+ *          drift_x += (E x B)_x / (By^2 + Bz^2)
+ *                   = (Ey*Bz - Ez*By) / (By^2 + Bz^2)
  *  3. Lorentz boost of the thermal momentum into the drift frame.
- *     (Probabilistic reflection intentionally OMITTED — manual #4.)
  *  4. [charge_correction] multiplicative weight perturbation
- *     (user_sheet_new.F90 form):
- *        w_new = w * (1 + rho0 * sqrt(sigma) * skindepth * sign(q))
+ *          w_new = w * (1 + rho0 * sqrt(sigma) * skindepth * sign(q))
  *     For an X-kick Ex = 0 and Ey is the nonzero in-plane E, so
- *        rho0 = div(E) = dEy/dy   (per-cell difference of Ey in y).
- *     No-op while kick_velocity = 0.
+ *          rho0 = div(E) = dEy/dy   (per-cell difference of Ey in y).
  *
- * Input parameters (setup.*)
- * --------------------------
- *   background_temperature    thermal temperature (m_e c^2)        [default 1e-2]
- *   kick_velocity             tube approach velocity / c           [default 0.1]
- *   guide_field_floor         floor keeping Bz > 0 everywhere      [default 0.01]
- *   charge_correction         weight correction for Gauss's law    [default true]
- *   single_tube               initialise only tube 1               [default false]
- *   tube_radius               tube radius (code units)             [default 0.99*Lx/4]
- *
- * =====================  MANUAL CHECKS REQUIRED  =====================
- *  #1 Factor in drift normalisation (sqrt(sigma)*skindepth, no /2):
- *     single_tube=true, kick_velocity=0, output J at step 0-1, compare Jz
- *     along the tube diameter with (alpha_t/R)*J0(alpha_t*r/R).
- *     Ratio 1 -> correct; ratio 0.5 -> restore /2.
- *  #2 Charge-correction factor sqrt(sigma)*skindepth is Tristan-units verbatim;
- *     re-derive in Entity units before kick != 0 runs.
- *  #3 rho0 is a PER-CELL difference (Tristan convention, cell = 1).
- *     Valid only if 1 grid cell = 1 code-length unit in the toml.
- *  #4 Reflection removed: for |drift| >~ 0.3 the boosted Maxwellian is biased.
- *  #5 Uniform injection (no buffer zones).
- *  #6 No field smoothing implemented here.
- *  #7 Assumes species charge() = +1 / -1 exactly.
- *  #8 absorbing_bnd block of user_sheet_new.F90 NOT ported.
- *  #9 Compile check against your Entity version.
- *  #10 X-KICK GEOMETRY (new): verify at t=0 that tube 1 (left) drifts +x and
- *      tube 2 (right) drifts -x (head-on). The ExB denominator By^2 + Bz^2 is
- *      a symmetry argument, not Tristan-sourced — confirm with the same
- *      force-free / drift-direction check as #1.
- *  #11 Tube-overlap assumption: the ex3 / ExB / charge-correction "else =>
- *      tube 2" fall-through is valid only because the tube interiors are
- *      disjoint (centres 2*tube_radius apart). If you move them closer, add an
- *      explicit tube-2 membership test.
- * ====================================================================
- */
+ **/
 
 #include "enums.h"
 #include "global.h"
@@ -276,8 +237,8 @@ namespace user
 
             if (!single_tube) 
             {
-                const real_t normalised_radius_tube2 =
-                    math::sqrt(SQR(x_Ph[0] - tube2_x_centre) + SQR(x_Ph[1] - tube2_y_centre)) / tube_radius;
+                const real_t normalised_radius_tube2 = math::sqrt(SQR(x_Ph[0] - tube2_x_centre) + SQR(x_Ph[1] - tube2_y_centre)) / tube_radius;
+                
                 if (normalised_radius_tube2 < ONE)
                     return math::sqrt(SQR(bessel_J0(alpha_t * normalised_radius_tube2)) + guide_field_floor);
             }
@@ -290,8 +251,8 @@ namespace user
         real_t ex1(const coord_t<D>&) const { return ZERO; }
 
         //! Ey = -v x B |_y.
-        //? Tube 1 (left,  +x kick): Ey = -kick_velocity * Bz
-        //? Tube 2 (right, -x kick): Ey = +kick_velocity * Bz
+        //? Tube 1 (left,  +x kick): Ey = +kick_velocity * Bz
+        //? Tube 2 (right, -x kick): Ey = -kick_velocity * Bz
         //? Outside both tubes: 0
         KOKKOS_INLINE_FUNCTION
         real_t ex2(const coord_t<D>& x_Ph) const
@@ -327,9 +288,11 @@ namespace user
 
             const real_t normalised_radius_tube1 = math::sqrt(SQR(x - tube1_x_centre) + SQR(y - tube1_y_centre)) / tube_radius;
             real_t normalised_radius_tube2 = static_cast<real_t>(2.0);   // >=1: tube 2 absent (single_tube mode)
+            
             if (!single_tube)
                 normalised_radius_tube2 = math::sqrt(SQR(x - tube2_x_centre) + SQR(y - tube2_y_centre)) / tube_radius;
 
+            //* Ez outside tubes = 0 
             if (normalised_radius_tube1 >= ONE && normalised_radius_tube2 >= ONE)
                 return ZERO;
 
@@ -337,13 +300,13 @@ namespace user
             real_t Az_left;
             {
                 const real_t x_q = x - HALF * cell_width_x;
-                const real_t rn1 = math::sqrt(SQR(x_q - tube1_x_centre) + SQR(y - tube1_y_centre)) / tube_radius;
-                const real_t rn2 = math::sqrt(SQR(x_q - tube2_x_centre) + SQR(y - tube2_y_centre)) / tube_radius;
+                const real_t normalised_radius_tube1 = math::sqrt(SQR(x_q - tube1_x_centre) + SQR(y - tube1_y_centre)) / tube_radius;
+                const real_t normalised_radius_tube2 = math::sqrt(SQR(x_q - tube2_x_centre) + SQR(y - tube2_y_centre)) / tube_radius;
                 
-                if (rn1 < ONE)
-                    Az_left = (tube_radius / alpha_t) * bessel_J0(alpha_t * rn1);
-                else if (!single_tube && rn2 < ONE)
-                    Az_left = (tube_radius / alpha_t) * bessel_J0(alpha_t * rn2);
+                if (normalised_radius_tube1 < ONE)
+                    Az_left = (tube_radius / alpha_t) * bessel_J0(alpha_t * normalised_radius_tube1);
+                else if (!single_tube && normalised_radius_tube2 < ONE)
+                    Az_left = (tube_radius / alpha_t) * bessel_J0(alpha_t * normalised_radius_tube2);
                 else
                     Az_left = Az_exterior;
             }
@@ -352,13 +315,13 @@ namespace user
             real_t Az_right;
             {
                 const real_t x_q = x + HALF * cell_width_x;
-                const real_t rn1 = math::sqrt(SQR(x_q - tube1_x_centre) + SQR(y - tube1_y_centre)) / tube_radius;
-                const real_t rn2 = math::sqrt(SQR(x_q - tube2_x_centre) + SQR(y - tube2_y_centre)) / tube_radius;
+                const real_t normalised_radius_tube1 = math::sqrt(SQR(x_q - tube1_x_centre) + SQR(y - tube1_y_centre)) / tube_radius;
+                const real_t normalised_radius_tube2 = math::sqrt(SQR(x_q - tube2_x_centre) + SQR(y - tube2_y_centre)) / tube_radius;
                 
-                if (rn1 < ONE)
-                    Az_right = (tube_radius / alpha_t) * bessel_J0(alpha_t * rn1);
-                else if (!single_tube && rn2 < ONE)
-                    Az_right = (tube_radius / alpha_t) * bessel_J0(alpha_t * rn2);
+                if (normalised_radius_tube1 < ONE)
+                    Az_right = (tube_radius / alpha_t) * bessel_J0(alpha_t * normalised_radius_tube1);
+                else if (!single_tube && normalised_radius_tube2 < ONE)
+                    Az_right = (tube_radius / alpha_t) * bessel_J0(alpha_t * normalised_radius_tube2);
                 else
                     Az_right = Az_exterior;
             }
@@ -432,21 +395,16 @@ namespace user
             const real_t Lx = global_x_max - global_x_min;
             const real_t Ly = global_y_max - global_y_min;
 
-            // Tube radius default = 0.99 * Lx/4 (slightly less than 1/4 to move tube edges away from boundaries).
+            //* Tube radius default = 0.99 * Lx/4 (slightly less than 1/4 to move tube edges away from boundaries)
             const real_t tube_radius = p.template get<real_t>("setup.tube_radius", Lx * static_cast<real_t>(0.99 * 0.25));
-
-            // Tubes SIDE BY SIDE ALONG X (same y centre, offset in x):
-            //   tube 1 (left)  centre = (Lx/2 - tube_radius, Ly/2)
-            //   tube 2 (right) centre = (Lx/2 + tube_radius, Ly/2)
             const real_t domain_x_centre = global_x_min + HALF * Lx;
             const real_t domain_y_centre = global_y_min + HALF * Ly;
-
             const real_t dx = Lx / static_cast<real_t>(mesh.n_active(in::x1));
             const real_t dy = Ly / static_cast<real_t>(mesh.n_active(in::x2));
 
             init_flds = InitFields<D>(tube_radius,
-                                      domain_x_centre - tube_radius, domain_y_centre,   // tube 1 (left)
-                                      domain_x_centre + tube_radius, domain_y_centre,   // tube 2 (right)
+                                      domain_x_centre - tube_radius, domain_y_centre,   // Tube 1 (left):  (Lx/2 - tube_radius, Ly/2)
+                                      domain_x_centre + tube_radius, domain_y_centre,   // Tube 2 (right): (Lx/2 + tube_radius, Ly/2)
                                       dx, dy, guide_field_floor, kick_velocity, single_tube);
         }
 
@@ -456,16 +414,6 @@ namespace user
         {
             return init_flds;
         }
-
-
-        //  Stage 2 — per-particle drift boost so that the deposited particle
-        //            current reproduces J = curl(B):
-        //            (a) drift = sign(q) * sqrt(sigma)*skindepth * J(analytic)
-        //            (b) drift_x += (Ey*Bz - Ez*By)/(By^2 + Bz^2)   [ExB, X-kick]
-        //            (c) Lorentz boost of thermal momentum into drift frame
-        //            (d) [charge_correction] multiplicative weight
-        //                perturbation from div(E) = dEy/dy
-        //
 
         inline void InitPrtls(Domain<S, M>& domain)
         {
@@ -479,27 +427,27 @@ namespace user
             const auto& mesh       = domain.mesh;
 
             // Local copies for device capture (members of *this and init_flds cannot be captured into a KOKKOS_LAMBDA directly)
-            const real_t tube_radius       = init_flds.tube_radius;
-            const real_t tube1_x_centre    = init_flds.tube1_x_centre;
-            const real_t tube1_y_centre    = init_flds.tube1_y_centre;
-            const real_t tube2_x_centre    = init_flds.tube2_x_centre;
-            const real_t tube2_y_centre    = init_flds.tube2_y_centre;
-            const real_t cell_width_y      = init_flds.cell_width_y;
-            const real_t cell_width_x      = init_flds.cell_width_x;
-            const real_t floor_local       = guide_field_floor;
-            const real_t kick_local        = kick_velocity;
-            const bool   single_tube_local = single_tube;
+            const real_t tube_radius          = init_flds.tube_radius;
+            const real_t tube1_x_centre       = init_flds.tube1_x_centre;
+            const real_t tube1_y_centre       = init_flds.tube1_y_centre;
+            const real_t tube2_x_centre       = init_flds.tube2_x_centre;
+            const real_t tube2_y_centre       = init_flds.tube2_y_centre;
+            const real_t cell_width_y         = init_flds.cell_width_y;
+            const real_t cell_width_x         = init_flds.cell_width_x;
+            const real_t floor_local          = guide_field_floor;
+            const real_t kick_local           = kick_velocity;
+            const bool   single_tube_local    = single_tube;
             const bool   do_charge_correction = charge_correction;
-            const real_t Az_exterior       = init_flds.Az_exterior;
-            constexpr real_t alpha_t       = InitFields<D>::alpha_t;
+            const real_t Az_exterior          = init_flds.Az_exterior;
+            constexpr real_t alpha_t          = InitFields<D>::alpha_t;
 
             for (auto s = 0u; s < domain.species.size(); ++s)
             {
                 auto& sp            = domain.species[s];
-                const real_t charge = sp.charge();   // assumed +-1 (electron-positron plasma)
+                const real_t charge = sp.charge();      // assumed +-1 (electron-positron plasma)
 
-                // Extract Kokkos view handles before the lambda
-                // (sp has a deleted copy constructor; never capture by [=]).
+                // Extract Kokkos view handles before the lambda: the species object can't be
+                // copied into a GPU kernel, but its array handles (i1, ux1, ...) can
                 const auto cell_x = sp.i1;
                 const auto cell_y = sp.i2;
                 const auto frac_x = sp.dx1;
@@ -514,107 +462,88 @@ namespace user
                 {
                     if (tag(p) == ParticleTag::dead) return;
 
-                    // Physical particle position
+                    // Physical position of particles
                     const real_t x_Cd = static_cast<real_t>(cell_x(p)) + static_cast<real_t>(frac_x(p));
                     const real_t y_Cd = static_cast<real_t>(cell_y(p)) + static_cast<real_t>(frac_y(p));
                     const real_t x = mesh.metric.template convert<1, Crd::Cd, Crd::XYZ>(x_Cd);
                     const real_t y = mesh.metric.template convert<2, Crd::Cd, Crd::XYZ>(y_Cd);
 
-                    // ================================================
-                    //  (a) Current-driven drift:
-                    //      drift = sign(q) * sqrt(sigma)*skindepth * J
-                    //
-                    //  Analytic force-free J = curl(B) per tube (layout-independent):
-                    //    Jz         = (alpha_t/R) * J0(alpha_t*rn)
-                    //    Jphi       = (alpha_t/R) * J0*J1 / Bz       (= -dBz/dr)
-                    //    Jx = -Jphi*(y-yc)/r,  Jy = +Jphi*(x-xc)/r
-                    //  Tube selection: if / else-if, as in Tristan.
-                    // ================================================
+                    //! ==================== J = ∇ x B ==================== !//
                     real_t Jx = ZERO, Jy = ZERO, Jz = ZERO;
                     {
                         const real_t delta_x_1 = x - tube1_x_centre;
                         const real_t delta_y_1 = y - tube1_y_centre;
-                        const real_t radial_distance_1 =
-                            math::sqrt(SQR(delta_x_1) + SQR(delta_y_1));
-                        const real_t rn1 = radial_distance_1 / tube_radius;
+                        const real_t radial_distance_1 = math::sqrt(SQR(delta_x_1) + SQR(delta_y_1));
+                        const real_t normalised_radius_tube1 = radial_distance_1 / tube_radius;
 
                         const real_t delta_x_2 = x - tube2_x_centre;
                         const real_t delta_y_2 = y - tube2_y_centre;
-                        const real_t radial_distance_2 =
-                            math::sqrt(SQR(delta_x_2) + SQR(delta_y_2));
-                        const real_t rn2 = radial_distance_2 / tube_radius;
+                        const real_t radial_distance_2 = math::sqrt(SQR(delta_x_2) + SQR(delta_y_2));
+                        const real_t normalised_radius_tube2 = radial_distance_2 / tube_radius;
 
-                        const real_t axis_epsilon =
-                            static_cast<real_t>(1e-10) * tube_radius;
+                        const real_t axis_epsilon = static_cast<real_t>(1e-10) * tube_radius;
 
-                        if (rn1 < ONE && radial_distance_1 > axis_epsilon)
-                        {
-                            const real_t J0_value = bessel_J0(alpha_t * rn1);
-                            const real_t J1_value = bessel_J1(alpha_t * rn1);
-                            const real_t Bz_local =
-                                math::sqrt(SQR(J0_value) + floor_local);
-                            Jz = (alpha_t / tube_radius) * J0_value;
-                            const real_t Jphi_over_r =
-                                (alpha_t / tube_radius) * J0_value * J1_value
-                                / (Bz_local * radial_distance_1);
-                            Jx = -Jphi_over_r * delta_y_1;
-                            Jy = +Jphi_over_r * delta_x_1;
+                        if (normalised_radius_tube1 < ONE && radial_distance_1 > axis_epsilon)
+                        {   
+                            //* Compute J in flux tube 1
+                            const real_t J0_value = bessel_J0(alpha_t * normalised_radius_tube1);
+                            const real_t J1_value = bessel_J1(alpha_t * normalised_radius_tube1);
+                            const real_t Bz_local = math::sqrt(SQR(J0_value) + floor_local);
+                            
+                            //* J_phi(r) = -dBz/dr = (alpha_t / R) * J0 * J1 / Bz
+                            const real_t J_phi = (alpha_t / tube_radius) * J0_value * J1_value / Bz_local;
+                            
+                            Jx = -J_phi * delta_y_1/radial_distance_1;    // -J_phi(r) * (y - yc) / r
+                            Jy = +J_phi * delta_x_1/radial_distance_1;    //  J_phi(r) * (x - xc) / r
+                            Jz = (alpha_t / tube_radius) * J0_value;      // (alpha_t / R) * J0(alpha_t * r/R)
                         }
-                        else if (!single_tube_local &&
-                                 rn2 < ONE && radial_distance_2 > axis_epsilon)
-                        {
-                            const real_t J0_value = bessel_J0(alpha_t * rn2);
-                            const real_t J1_value = bessel_J1(alpha_t * rn2);
-                            const real_t Bz_local =
-                                math::sqrt(SQR(J0_value) + floor_local);
-                            Jz = (alpha_t / tube_radius) * J0_value;
-                            const real_t Jphi_over_r =
-                                (alpha_t / tube_radius) * J0_value * J1_value
-                                / (Bz_local * radial_distance_2);
-                            Jx = -Jphi_over_r * delta_y_2;
-                            Jy = +Jphi_over_r * delta_x_2;
+                        else if (!single_tube_local && normalised_radius_tube2 < ONE && radial_distance_2 > axis_epsilon)
+                        {   
+                            //* Compute J in flux tube 2
+                            const real_t J0_value = bessel_J0(alpha_t * normalised_radius_tube2);
+                            const real_t J1_value = bessel_J1(alpha_t * normalised_radius_tube2);
+                            const real_t Bz_local = math::sqrt(SQR(J0_value) + floor_local);
+                            
+                            //* J_phi(r) = -dBz/dr = (alpha_t / R) * J0 * J1 / Bz
+                            const real_t J_phi = (alpha_t / tube_radius) * J0_value * J1_value / Bz_local;
+                            
+                            Jx = -J_phi * delta_y_2/radial_distance_2;    // -J_phi(r) * (y - yc) / r
+                            Jy = +J_phi * delta_x_2/radial_distance_2;    //  J_phi(r) * (x - xc) / r
+                            Jz = (alpha_t / tube_radius) * J0_value;      // (alpha_t / R) * J0(alpha_t * r/R)
                         }
                     }
 
-                    //!  drift_velocity = J * sqrt(sigma) * skindepth * sign(q)
+                    //! Current-driven drift velocity, β = J * sqrt(sigma) * skindepth * sign(q)
                     //? This is the correct entity conversion factor!!
                     real_t drift_x = skindepth * math::sqrt(sigma) * charge * Jx;
                     real_t drift_y = skindepth * math::sqrt(sigma) * charge * Jy;
                     real_t drift_z = skindepth * math::sqrt(sigma) * charge * Jz;
 
-                    // ================================================
-                    //  (b) ExB drift — X-KICK layout.
-                    //      The DRIVEN drift is along x:
-                    //        drift_x += (E x B)_x / (By^2 + Bz^2)
-                    //                 = (Ey*Bz - Ez*By) / (By^2 + Bz^2)
-                    //      Fields evaluated ANALYTICALLY at the particle position.
-                    //      Denominator By^2 + Bz^2 by symmetry — MANUAL CHECK #10.
-                    // ================================================
+
+                    //! ==================== E x B drift ==================== !//
                     if (kick_local != ZERO)
                     {
-                        const real_t rn1 =
-                            math::sqrt(SQR(x - tube1_x_centre) + SQR(y - tube1_y_centre)) / tube_radius;
-                        real_t rn2 = static_cast<real_t>(2.0);   // "outside" sentinel
+                        const real_t normalised_radius_tube1 = math::sqrt(SQR(x - tube1_x_centre) + SQR(y - tube1_y_centre)) / tube_radius;
+                        real_t normalised_radius_tube2 = static_cast<real_t>(2.0);   // >=1: tube 2 absent (single_tube mode)
                         if (!single_tube_local)
-                            rn2 = math::sqrt(SQR(x - tube2_x_centre) + SQR(y - tube2_y_centre)) / tube_radius;
+                            normalised_radius_tube2 = math::sqrt(SQR(x - tube2_x_centre) + SQR(y - tube2_y_centre)) / tube_radius;
 
-                        if (rn1 < ONE || rn2 < ONE)
+                        if (normalised_radius_tube1 < ONE || normalised_radius_tube2 < ONE)
                         {
-                            // Bz at particle
+                            // Bz at particle = sqrt( J0(alpha_t * r/R)^2 + floor )
                             real_t Bz;
-                            if (rn1 < ONE)
-                                Bz = math::sqrt(SQR(bessel_J0(alpha_t * rn1)) + floor_local);
+                            if (normalised_radius_tube1 < ONE)
+                                Bz = math::sqrt(SQR(bessel_J0(alpha_t * normalised_radius_tube1)) + floor_local);
                             else
-                                Bz = math::sqrt(SQR(bessel_J0(alpha_t * rn2)) + floor_local);
+                                Bz = math::sqrt(SQR(bessel_J0(alpha_t * normalised_radius_tube2)) + floor_local);
 
-                            // By at particle: (Az(x-dx/2) - Az(x+dx/2)) / dx   [= -dAz/dx]
+                            // By at particle = (Az(x-dx/2) - Az(x+dx/2)) / dx   [= -dAz/dx]
                             real_t Az_left;
                             {
                                 const real_t x_q = x - HALF * cell_width_x;
-                                const real_t rq1 = math::sqrt(SQR(x_q - tube1_x_centre)
-                                                            + SQR(y - tube1_y_centre)) / tube_radius;
-                                const real_t rq2 = math::sqrt(SQR(x_q - tube2_x_centre)
-                                                            + SQR(y - tube2_y_centre)) / tube_radius;
+                                const real_t rq1 = math::sqrt(SQR(x_q - tube1_x_centre) + SQR(y - tube1_y_centre)) / tube_radius;
+                                const real_t rq2 = math::sqrt(SQR(x_q - tube2_x_centre) + SQR(y - tube2_y_centre)) / tube_radius;
+                                
                                 if (rq1 < ONE)
                                     Az_left = (tube_radius / alpha_t) * bessel_J0(alpha_t * rq1);
                                 else if (!single_tube_local && rq2 < ONE)
@@ -625,10 +554,9 @@ namespace user
                             real_t Az_right;
                             {
                                 const real_t x_q = x + HALF * cell_width_x;
-                                const real_t rq1 = math::sqrt(SQR(x_q - tube1_x_centre)
-                                                            + SQR(y - tube1_y_centre)) / tube_radius;
-                                const real_t rq2 = math::sqrt(SQR(x_q - tube2_x_centre)
-                                                            + SQR(y - tube2_y_centre)) / tube_radius;
+                                const real_t rq1 = math::sqrt(SQR(x_q - tube1_x_centre) + SQR(y - tube1_y_centre)) / tube_radius;
+                                const real_t rq2 = math::sqrt(SQR(x_q - tube2_x_centre) + SQR(y - tube2_y_centre)) / tube_radius;
+                                
                                 if (rq1 < ONE)
                                     Az_right = (tube_radius / alpha_t) * bessel_J0(alpha_t * rq1);
                                 else if (!single_tube_local && rq2 < ONE)
@@ -638,120 +566,94 @@ namespace user
                             }
                             const real_t By = (Az_left - Az_right) / cell_width_x;
 
-                            // Motional E at particle (sign per tube), X-kick:
-                            //   tube 1 (left):  Ey = -kick*Bz, Ez = +kick*By
-                            //   tube 2 (right): Ey = +kick*Bz, Ez = -kick*By
+                            //* Motional E at particle
+                            //*     Tube 1 (left) : Ey = +kick*Bz, Ez = -kick*By
+                            //*     Tube 2 (right): Ey = -kick*Bz, Ez = +kick*By
                             real_t Ey, Ez;
-                            if (rn1 < ONE) { Ey = +kick_local * Bz;  Ez = -kick_local * By; }
-                            else           { Ey = -kick_local * Bz;  Ez = +kick_local * By; }
+                            if (normalised_radius_tube1 < ONE)  { Ey = +kick_local * Bz;  Ez = -kick_local * By; }
+                            else                                { Ey = -kick_local * Bz;  Ez = +kick_local * By; }
 
-                            const real_t ByBz_squared = By * By + Bz * Bz;
-                            if (ByBz_squared > ZERO)
-                                drift_x += (Ey * Bz - Ez * By) / ByBz_squared;
+                            //! Motional drift velocity = (Ey*Bz - Ez*By) / (By^2 + Bz^2)
+                            drift_x = drift_x + (Ey * Bz - Ez * By) / (By * By + Bz * Bz);
                         }
                     }
 
                     // ================================================
-                    //  Safety clamp on |drift|.
-                    //  (Tristan instead ABORTS when beta_sq >= 100;
-                    //   we clamp at 0.99 to stay device-safe. If the
-                    //   clamp ever triggers, the normalisation is
-                    //   wrong — investigate, do not ignore.)
+                    // Safety clamp on |drift| at 0.99 to stay device-safe. 
+                    // If the clamp ever triggers, the normalisation is
+                    // wrong — investigate, do not ignore.
                     // ================================================
-                    real_t drift_speed_squared = drift_x * drift_x
-                                               + drift_y * drift_y
-                                               + drift_z * drift_z;
+                    real_t drift_speed_squared = drift_x * drift_x + drift_y * drift_y + drift_z * drift_z;
                     constexpr real_t MAX_DRIFT_SPEED    = static_cast<real_t>(0.99);
                     constexpr real_t MAX_DRIFT_SPEED_SQ = MAX_DRIFT_SPEED * MAX_DRIFT_SPEED;
                     if (drift_speed_squared >= MAX_DRIFT_SPEED_SQ)
                     {
-                        const real_t rescale = MAX_DRIFT_SPEED
-                                             / math::sqrt(drift_speed_squared);
+                        const real_t rescale = MAX_DRIFT_SPEED / math::sqrt(drift_speed_squared);
                         drift_x *= rescale;
                         drift_y *= rescale;
                         drift_z *= rescale;
                         drift_speed_squared = MAX_DRIFT_SPEED_SQ;
                     }
 
-                    // ================================================
-                    //  (c) Lorentz boost into the drift frame.
-                    //  (NO probabilistic reflection — removed on
-                    //   request; manual check #4.)
-                    // ================================================
+                    //! Lorentz boost into the drift frame
                     if (drift_speed_squared > ZERO)
                     {
                         const real_t ux = ux1(p);
                         const real_t uy = ux2(p);
                         const real_t uz = ux3(p);
-                        const real_t lorentz_factor_thermal =
-                            math::sqrt(ONE + ux * ux + uy * uy + uz * uz);
 
-                        const real_t lorentz_factor_drift =
-                            ONE / math::sqrt(ONE - drift_speed_squared);
+                        const real_t lorentz_factor_thermal = math::sqrt(ONE + ux * ux + uy * uy + uz * uz);    // γ_th = sqrt(1 + |u|²)
+                        const real_t lorentz_factor_drift   = ONE / math::sqrt(ONE - drift_speed_squared);      // γ_d  = 1/sqrt(1 - |β_d|²)
+
+                        // u_d = γ_d β_d
                         const real_t boosted_ux = lorentz_factor_drift * drift_x;
                         const real_t boosted_uy = lorentz_factor_drift * drift_y;
                         const real_t boosted_uz = lorentz_factor_drift * drift_z;
-                        const real_t boost =
-                            (ux * boosted_ux + uy * boosted_uy + uz * boosted_uz)
-                            / (lorentz_factor_drift + ONE)
-                            + lorentz_factor_thermal;
 
+                        // f = (u · u_d)/(γ_d + 1) + γ_th
+                        const real_t boost = (ux * boosted_ux + uy * boosted_uy + uz * boosted_uz) / (lorentz_factor_drift + ONE) + lorentz_factor_thermal;
+
+                        // u'_x = u_x + f · u_d,x
                         ux1(p) = ux + boost * boosted_ux;
                         ux2(p) = uy + boost * boosted_uy;
                         ux3(p) = uz + boost * boosted_uz;
                     }
 
-                    // ================================================
-                    //  (d) Charge-density weight correction.
-                    //  user_sheet_new.F90 (MULTIPLICATIVE form):
+                    //! Charge-density weight correction
                     //    w_new = w * (1 + rho0 * sqrt(sigma)*skindepth * sign(q))
-                    //  X-KICK layout: Ex = 0, Ey is the nonzero in-plane E,
-                    //  d/dz = 0, so div(E) = dEy/dy. Tristan-style per-cell:
-                    //    rho0 = Ey(y + dy/2) - Ey(y - dy/2)     [cell = 1]
-                    //  analytic Ey, NOT divided by dy -> requires 1 cell = 1
-                    //  code unit (manual check #3). No-op when kick = 0.
-                    // ================================================
                     if (do_charge_correction && kick_local != ZERO)
                     {
                         // Ey at (x, y + dy/2)
                         real_t Ey_upper;
                         {
                             const real_t y_q = y + HALF * cell_width_y;
-                            const real_t rq1 = math::sqrt(SQR(x - tube1_x_centre)
-                                                        + SQR(y_q - tube1_y_centre)) / tube_radius;
-                            const real_t rq2 = math::sqrt(SQR(x - tube2_x_centre)
-                                                        + SQR(y_q - tube2_y_centre)) / tube_radius;
+                            const real_t rq1 = math::sqrt(SQR(x - tube1_x_centre) + SQR(y_q - tube1_y_centre)) / tube_radius;
+                            const real_t rq2 = math::sqrt(SQR(x - tube2_x_centre) + SQR(y_q - tube2_y_centre)) / tube_radius;
                             if (rq1 < ONE)
-                                Ey_upper = -kick_local *
-                                    math::sqrt(SQR(bessel_J0(alpha_t * rq1)) + floor_local);
+                                Ey_upper = +kick_local * math::sqrt(SQR(bessel_J0(alpha_t * rq1)) + floor_local);
                             else if (!single_tube_local && rq2 < ONE)
-                                Ey_upper = +kick_local *
-                                    math::sqrt(SQR(bessel_J0(alpha_t * rq2)) + floor_local);
+                                Ey_upper = -kick_local * math::sqrt(SQR(bessel_J0(alpha_t * rq2)) + floor_local);
                             else
                                 Ey_upper = ZERO;
                         }
+
                         // Ey at (x, y - dy/2)
                         real_t Ey_lower;
                         {
                             const real_t y_q = y - HALF * cell_width_y;
-                            const real_t rq1 = math::sqrt(SQR(x - tube1_x_centre)
-                                                        + SQR(y_q - tube1_y_centre)) / tube_radius;
-                            const real_t rq2 = math::sqrt(SQR(x - tube2_x_centre)
-                                                        + SQR(y_q - tube2_y_centre)) / tube_radius;
+                            const real_t rq1 = math::sqrt(SQR(x - tube1_x_centre) + SQR(y_q - tube1_y_centre)) / tube_radius;
+                            const real_t rq2 = math::sqrt(SQR(x - tube2_x_centre) + SQR(y_q - tube2_y_centre)) / tube_radius;
                             if (rq1 < ONE)
-                                Ey_lower = -kick_local *
-                                    math::sqrt(SQR(bessel_J0(alpha_t * rq1)) + floor_local);
+                                Ey_lower = +kick_local * math::sqrt(SQR(bessel_J0(alpha_t * rq1)) + floor_local);
                             else if (!single_tube_local && rq2 < ONE)
-                                Ey_lower = +kick_local *
-                                    math::sqrt(SQR(bessel_J0(alpha_t * rq2)) + floor_local);
+                                Ey_lower = -kick_local * math::sqrt(SQR(bessel_J0(alpha_t * rq2)) + floor_local);
                             else
                                 Ey_lower = ZERO;
                         }
 
                         const real_t rho0 = Ey_upper - Ey_lower;   // per-cell div(E) = dEy/dy
 
-                        const real_t new_weight =
-                            weight(p) * (ONE + rho0 * skindepth * math::sqrt(sigma) * charge);
+                        const real_t new_weight = weight(p) * (ONE + rho0 * skindepth * math::sqrt(sigma) * charge);
                         if (new_weight > ZERO)
                             weight(p) = new_weight;
                     }
