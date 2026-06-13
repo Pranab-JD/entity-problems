@@ -151,7 +151,7 @@ namespace user
             const real_t x = x_Ph[0];
             const real_t y = x_Ph[1];
 
-            // Az at (x, y + cell_width_y/2)
+            // Az(x, y + cell_width_y/2)
             real_t Az_upper;
             {
                 const real_t y_q = y + HALF * cell_width_y;
@@ -166,7 +166,7 @@ namespace user
                     Az_upper = Az_exterior;
             }
 
-            // Az at (x, y - cell_width_y/2)
+            // Az(x, y - cell_width_y/2)
             real_t Az_lower;
             {
                 const real_t y_q = y - HALF * cell_width_y;
@@ -191,7 +191,7 @@ namespace user
             const real_t x = x_Ph[0];
             const real_t y = x_Ph[1];
 
-            //* Az(x - dx/2, y)
+            // Az(x - dx/2, y)
             real_t Az_left;
             {
                 const real_t x_q = x - HALF * cell_width_x;
@@ -206,7 +206,7 @@ namespace user
                     Az_left = Az_exterior;
             }
 
-            //* Az(x + dx/2, y)
+            // Az(x + dx/2, y)
             real_t Az_right;
             {
                 const real_t x_q = x + HALF * cell_width_x;
@@ -296,7 +296,7 @@ namespace user
             if (normalised_radius_tube1 >= ONE && normalised_radius_tube2 >= ONE)
                 return ZERO;
 
-            //* Az(x - dx/2, y)
+            // Az(x - dx/2, y)
             real_t Az_left;
             {
                 const real_t x_q = x - HALF * cell_width_x;
@@ -311,7 +311,7 @@ namespace user
                     Az_left = Az_exterior;
             }
 
-            //* Az(x + dx/2, y)
+            // Az(x + dx/2, y)
             real_t Az_right;
             {
                 const real_t x_q = x + HALF * cell_width_x;
@@ -578,11 +578,7 @@ namespace user
                         }
                     }
 
-                    // ================================================
-                    // Safety clamp on |drift| at 0.99 to stay device-safe. 
-                    // If the clamp ever triggers, the normalisation is
-                    // wrong — investigate, do not ignore.
-                    // ================================================
+                    // Safety clamp on |drift| at 0.99 to stay device-safe
                     real_t drift_speed_squared = drift_x * drift_x + drift_y * drift_y + drift_z * drift_z;
                     constexpr real_t MAX_DRIFT_SPEED    = static_cast<real_t>(0.99);
                     constexpr real_t MAX_DRIFT_SPEED_SQ = MAX_DRIFT_SPEED * MAX_DRIFT_SPEED;
@@ -602,18 +598,18 @@ namespace user
                         const real_t uy = ux2(p);
                         const real_t uz = ux3(p);
 
-                        const real_t lorentz_factor_thermal = math::sqrt(ONE + ux * ux + uy * uy + uz * uz);    // γ_th = sqrt(1 + |u|²)
-                        const real_t lorentz_factor_drift   = ONE / math::sqrt(ONE - drift_speed_squared);      // γ_d  = 1/sqrt(1 - |β_d|²)
+                        const real_t lorentz_factor_thermal = math::sqrt(ONE + ux * ux + uy * uy + uz * uz);    //* γ_th = sqrt(1 + |u|²)
+                        const real_t lorentz_factor_drift   = ONE / math::sqrt(ONE - drift_speed_squared);      //* γ_d  = 1/sqrt(1 - |β_d|²)
 
-                        // u_d = γ_d β_d
+                        //* u_d = γ_d β_d
                         const real_t boosted_ux = lorentz_factor_drift * drift_x;
                         const real_t boosted_uy = lorentz_factor_drift * drift_y;
                         const real_t boosted_uz = lorentz_factor_drift * drift_z;
 
-                        // f = (u · u_d)/(γ_d + 1) + γ_th
+                        //* f = (u · u_d)/(γ_d + 1) + γ_th
                         const real_t boost = (ux * boosted_ux + uy * boosted_uy + uz * boosted_uz) / (lorentz_factor_drift + ONE) + lorentz_factor_thermal;
 
-                        // u'_x = u_x + f · u_d,x
+                        //* u'_x = u_x + f · u_d,x
                         ux1(p) = ux + boost * boosted_ux;
                         ux2(p) = uy + boost * boosted_uy;
                         ux3(p) = uz + boost * boosted_uz;
@@ -669,3 +665,5 @@ namespace user
 } // namespace user
 
 #endif // PROBLEM_GENERATOR_H
+
+//TODO: Implement "nsmooth" smoothing from Tristan
