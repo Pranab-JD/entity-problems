@@ -1,9 +1,7 @@
-# Set up is based on Lyutikov et al. 2017 §4.2, Ripperda et al. 2019 §4
-
 [simulation]
-    name    = "/scratch/project_465002528/pjd/flux_tubes_CG/Test_FF/tubes"
+    name    = "/scratch/project_465002528/pjd/flux_tubes_CG/2D_512_test/tubes"
     engine  = "srpic"
-    runtime = 200.0
+    runtime = 1000.0
 
     [simulation.domain]
         decomposition = [-1, -1]
@@ -17,10 +15,10 @@
         metric = "minkowski"
 
     [grid.boundaries]
-        fields    = [["MATCH", "MATCH"],   ["MATCH", "MATCH"]]
-        particles = [["ABSORB", "ABSORB"], ["ABSORB", "ABSORB"]] 
-        # fields    = [["PERIODIC"], ["PERIODIC"]]
-        # particles = [["PERIODIC"], ["PERIODIC"]]
+        # fields    = [["MATCH", "MATCH"],   ["MATCH", "MATCH"]]
+        # particles = [["ABSORB", "ABSORB"], ["ABSORB", "ABSORB"]] 
+        fields    = [["PERIODIC"], ["PERIODIC"]]
+        particles = [["PERIODIC"], ["PERIODIC"]]
 
 [algorithms]
     current_filters = 0
@@ -30,7 +28,7 @@
 
 
 [particles]
-    ppc0 = 128.0
+    ppc0 = 64.0
 
     [[particles.species]]
         label    = "e-"
@@ -47,12 +45,12 @@
 
 [scales]
     skindepth0 = 1.0                      #* de = skindepth0 = 1.0 code unit for pair plasma
-    larmor0    = 0.2                      #* sigma = (skindepth0/larmor0)**2
+    larmor0    = 0.1                      #* sigma = (skindepth0/larmor0)**2
     
 
 [setup]
     #* Plasma
-    background_temperature = 0.005        #* Background temperature
+    background_temperature = 0.005        #* Background temperature (Debye length ~ sqrt(background_temperature))
     guide_field_floor      = 0.0001       #* Base/floor guide field (to avoid numerical instabilities)
     # nsmooth                = 16
     charge_correction      = false
@@ -64,18 +62,26 @@
 
 
 [output]
-    interval = 250
     format   = "BPFile"
 
     [output.fields]
-        quantities = ["N", "B", "E", "J"]
+        quantities  = ["N", "B", "E", "J"]
+        interval    = -1
 
     [output.particles]
-        enable = false
+        enable      = false
 
     [output.spectra]
-        enable = false
-
+        enable      = true
+        e_min       = 1e-5
+        e_max       = 1e4
+        log_bins    = true
+        n_bins      = 3600
+        interval    = 100
+    
+    [output.stats]
+        quantities  = ["B^2", "E^2", "ExB", "J.E", "Rho", "T00"]
+        interval    = 50
 
 [diagnostics]
     interval  = 500
@@ -83,5 +89,5 @@
 
 
 [checkpoint]
-    interval = 5000
+    interval = 15000
     keep     = 1
