@@ -2,59 +2,105 @@
 #define PROBLEM_GENERATOR_H
 
 /**
- * @file pgen.hpp
- * @brief Problem generator for Velberg et al (2026) 2D/3D plasmoid/fluxtube coalescence reconnection
+ * @file Flux_Tubes_AV/pgen.hpp
+ * @brief Fadeev force-free island coalescence (Velberg et al. 2026 reconnection setup)
  *
- * ─────────────────────────────────────────────────────────────────────────────
- *! COORDINATE MAPPING
- *   x  (along sheet)      → x1
- *   y  (normal to sheet)  → x2
- *   z  (out of plane)     → x3   ← guide-field / primary-current direction
+ *~ References:
+ *      1. Velberg et al. (2026), VPIC reference deck (Velberg_2D.cc)
+ *      2. Fadeev et al. (1965), Nucl. Fusion, 5, 202
  *
- *! PHYSICS
- *   Fadeev force-free equilibrium (two coalescing islands) for a relativistic
- *   pair plasma (me = mi = 1, σ = 25) without a guide field (bg = 0 by default).
- *   A small symmetry-breaking perturbation seeds island coalescence.
+ *~ Coordinate mapping (VPIC -> Entity)
+ * -------------------------------------------------------------
+ *   x (along sheet)     -> x1   (X)
+ *   y (normal to sheet) -> x2   (Y)
+ *   z (out of plane)    -> x3   (Z)   <- guide-field / primary-current direction
  *
- *?   Initial Fields (Denom ≡ cosh(x2/L) + ε·cos(x1/L))
- *     bx1 = b0·sinh(x2/L)/Denom          [reversing / reconnecting component, X]
- *     bx2 = b0·ε·sin(x1/L)/Denom         [connecting / streaming component,   Y]
- *     bx3 = b0·√[(1−ε²)/Denom² + bg²]    [out-of-plane, force-free guide,     Z]
- *     ex1 = ex2 = ex3 = 0
+ *~ Field normalisation
+ * -------------------------------------------------------------
+ *   The asymptotic field amplitude is FIXED to unity in code units.
+ *   In Entity's Minkowski normalisation a code-unit field B = 1 corresponds
+ *   to the physical reference field B0 = 1 / larmor0. The magnetisation is
+ *   therefore set ENTIRELY through the [scales] block, NOT through a field
+ *   amplitude parameter:
  *
- *?   Symmetry-breaking perturbation (divergence free):
- *     dby = dby_frac · b0
- *     dbx = −dby · Lx / (2·Ly)
- *     δbx1 += dbx · cos(2π·x1/Lx) · sin(π·x2/Ly)
- *     δbx2 += dby · cos(π·x2/Ly)  · sin(2π·x1/Lx)
+ *       sigma = (skindepth0 / larmor0)^2
  *
- *?   Force-free current (J ∥ B, pair-plasma, uniform density n0):
- *     J_x3 = (b0/L)·(1−ε²)/Denom²                            [primary, out-of-plane]
- *     J_x1 = J_x3·sinh(x2/L) / √[(1−ε²)+bg²·Denom²]          [in-plane]
- *     J_x2 = J_x3·ε·sin(x1/L) / √[(1−ε²)+bg²·Denom²]
+ *   VPIC's b0 (= sqrt(sigma) in its natural units) is a magnetisation knob,
+ *   so a given VPIC b0 maps to Entity via:
  *
- *?   In Entity normalisation the drift velocity β̂ for each species is
- *     β_ref = √σ₀ · dₑ · (1−ε²) / [2 · L · Denom²]
- *     β_x   = β_ref · sinh(x2/L) / F,   F = √[(1−ε²)+bg²·Denom²]
- *     β_y   = β_ref · ε · sin(x1/L) / F
- *     β_z   = β_ref
+ *       sigma = b0_VPIC^2   <=>   skindepth0 / larmor0 = b0_VPIC
+ *
+ *   e.g. VPIC b0 = 5  ->  sigma = 25  ->  set skindepth0/larmor0 = 5 in the .toml.
+ *   No field-amplitude parameter is needed (or allowed) here.
+ *
+ *~ Physics setup
+ * -------------
+ * Fadeev force-free equilibrium (two coalescing magnetic islands) for a
+ * relativistic pair plasma (m_e = m_i = 1, sigma = 25) without a guide field
+ * (guide_field_ratio = 0 by default). A small divergence-free perturbation
+ * seeds the island coalescence.
+ *
+ *~ Field initialisation  (unit amplitude; physical B0 = 1/larmor0)
+ * --------------------------------------------------------------
+ *   fadeev_denom = cosh(y/sheet_half_thickness) + island_param * cos(x/sheet_half_thickness)
+ *
+ *   Bx =  sinh(y/sheet_half_thickness) / fadeev_denom                 [reversing / reconnecting, X]
+ *   By =  island_param * sin(x/sheet_half_thickness) / fadeev_denom   [connecting / streaming,   Y]
+ *   Bz =  sqrt( (1 - island_param^2)/fadeev_denom^2 + guide_field_ratio^2 )   [out-of-plane guide, Z]
+ *   Ex =  Ey = Ez = 0   (electric field zero at t = 0)
+ *
+ *~ Symmetry-breaking perturbation (divergence-free)
+ * --------------------------------------------------------------
+ *   pert_by_amplitude = perturbation_fraction                      (fraction of unit field)
+ *   pert_bx_amplitude = -pert_by_amplitude * Lx / (2 * Ly)         (from div(B) = 0)
+ *
+ *   dBx = pert_bx_amplitude * cos(2*pi*x/Lx) * sin(pi*y/Ly)
+ *   dBy = pert_by_amplitude * cos(pi*y/Ly)  * sin(2*pi*x/Lx)
+ *
+ *~ Force-free current (J parallel to B, pair plasma, uniform density n0)
+ * --------------------------------------------------------------
+ *   force_free_norm = sqrt( (1 - island_param^2) + guide_field_ratio^2 * fadeev_denom^2 )
+ *
+ *   Jz = (1/sheet_half_thickness) * (1 - island_param^2) / fadeev_denom^2   [primary, out-of-plane]
+ *   Jx = Jz * sinh(y/sheet_half_thickness) / force_free_norm                [in-plane]
+ *   Jy = Jz * island_param * sin(x/sheet_half_thickness) / force_free_norm
+ *
+ *~ Drift / current normalisation
+ * --------------------------------------------------------------
+ *   In Entity normalisation the drift speed (beta = v/c) for each species:
+ *     drift_x = (1/2) * sqrt(sigma) * skindepth * Jx
+ *     drift_y = (1/2) * sqrt(sigma) * skindepth * Jy
+ *     drift_z = (1/2) * sqrt(sigma) * skindepth * Jz
+ *                ^ factor 1/2: pair plasma, each species carries half the current
+ *                  (analogous to VPIC's VDY = -JY/2 for both-species current)
  *   Opposite species receive opposite kicks (net charge density = 0).
  *
- *! BOUNDARIES
- *   x1 : PERIODIC  (fields + particles)
- *   x2 : CONDUCTING / REFLECTING  (Fields conduct, particles reflect)
+ *~ Particle initialisation
+ * -----------------------------------------------------------
+ *  1. Uniform relativistic Maxwellian everywhere (uniform density: pressure
+ *     balance is magnetic, so no sech^2 density profile is needed).
+ *  2. Momentum kick  u += sign(q) * drift * gamma_drift  applied per species.
+ *     Because drift << v_th for fiducial parameters, the simple momentum-kick
+ *     approximation is accurate to O(beta^2/vth^2); the VPIC deck performs a
+ *     full Maxwell-Juttner boost, which coincides with this in the small-drift
+ *     limit.
  *
- *! PARAMETERS (to be set in the .toml)
- *   b0          normalised asymptotic field strength             [default 1.0]
- *   bg          guide-field ratio B_guide/b0                     [default 0.0]
- *   eps         Fadeev island parameter (0 < ε < 1)              [default 0.4]
- *   sheet_L     current-layer half-thickness in code units       [required]
- *   temperature kT/(m c²)  (relativistic temperature)            [required]
- *   dby_frac    perturbation amplitude |dBy|/b0                  [default -0.1]
- *   sigma0      magnetisation σ = (ωce/ωpe)²                     [from scales]
- *   skindepth0  electron skin depth d in physical units          [from scales]
- * ─────────────────────────────────────────────────────────────────────────────
- */
+ *~ Boundaries
+ * -----------------------------------------------------------
+ *   x1 : PERIODIC                (fields + particles)
+ *   x2 : CONDUCTING / REFLECTING (fields conduct, particles reflect)
+ *
+ *~ Parameters (set in the .toml)
+ * -----------------------------------------------------------
+ *   guide_field_ratio       B_guide (in units of the unit field)        [default 0.0]
+ *   island_param            Fadeev island parameter (0 < eps < 1)       [default 0.4]
+ *   sheet_half_thickness    current-layer half-thickness [code units]   [default 64.0]
+ *   background_temperature  kT/(m c^2) (relativistic temperature)       [default 0.01]
+ *   perturbation_fraction   |dBy| (fraction of unit field)              [default -0.1]
+ *   skindepth0              electron skin depth (physical units)        [from scales]
+ *   larmor0                 reference Larmor radius; B0 = 1/larmor0     [from scales]
+ *
+ **/
 
 #include "enums.h"
 #include "global.h"
@@ -69,296 +115,300 @@
 #include "archetypes/problem_generator.h"
 
 #include <utility>
+#include <vector>
 
 namespace user
 {
     using namespace ntt;
 
-    //! ==========================================================
-    //! Fadeev equilibrium + perturbation field initialiser
-    //! ==========================================================
+    //! =========================================================================
+    //!  E and B are initialised analytically (unit field amplitude in code units;
+    //!  physical reference field B0 = 1/larmor0).
+    //!  entity calls each component at its own Yee-stagger position.
+    //!
+    //!    fadeev_denom = cosh((y - sheet_y_centre)/sheet_half_thickness)
+    //!                       + island_param * cos((x - sheet_x_centre)/sheet_half_thickness)
+    //!
+    //!    Bx = sinh(y/sheet_half_thickness) / fadeev_denom + perturbation
+    //!    By = island_param * sin(x/sheet_half_thickness) / fadeev_denom + perturbation
+    //!    Bz = sqrt( (1 - island_param^2)/fadeev_denom^2 + guide_field_ratio^2 )
+    //!
+    //! =========================================================================
     template <Dimension D>
     struct InitFields
     {
-        InitFields( real_t b0,
-                    real_t bg,
-                    real_t eps,
-                    real_t sheet_L,
-                    real_t Lx,
-                    real_t Ly,
-                    real_t dby_frac,
-                    real_t cs_x,
-                    real_t cs_y) :
-                        b0      { b0 },
-                        bg      { bg },
-                        eps     { eps },
-                        L       { sheet_L },
-                        Lx      { Lx },
-                        Ly      { Ly },
-                        dby     { dby_frac * b0 },
-                        dbx     { -dby_frac * b0 * Lx / (TWO * Ly) },   // from ∇·B = 0
-                        cs_x    { cs_x },
-                        cs_y    { cs_y } {}
+        InitFields() = default;
 
-        Inline auto Fadeev_denominator(const coord_t<D>& x) const -> real_t
+        InitFields( real_t guide_field_ratio_,
+                    real_t island_param_,
+                    real_t sheet_half_thickness_,
+                    real_t Lx_,
+                    real_t Ly_,
+                    real_t perturbation_fraction_,
+                    real_t sheet_x_centre_,
+                    real_t sheet_y_centre_):
+                    guide_field_ratio    { guide_field_ratio_    },
+                    island_param         { island_param_         },
+                    sheet_half_thickness { sheet_half_thickness_ },
+                    Lx                   { Lx_                   },
+                    Ly                   { Ly_                   },
+                    sheet_x_centre       { sheet_x_centre_       },
+                    sheet_y_centre       { sheet_y_centre_       },
+                    pert_by_amplitude    { perturbation_fraction_ },
+                    pert_bx_amplitude    { -perturbation_fraction_ * Lx_ / (TWO * Ly_) }   // from div(B) = 0
+        {}
+
+        //! fadeev_denom = cosh(dy/L) + island_param * cos(dx/L)
+        Inline auto fadeev_denominator(const coord_t<D>& x_Ph) const -> real_t
         {
-            return math::cosh((x[1] - cs_y) / L) + eps * math::cos((x[0] - cs_x) / L);
+            const real_t delta_x = x_Ph[0] - sheet_x_centre;
+            const real_t delta_y = x_Ph[1] - sheet_y_centre;
+            return math::cosh(delta_y / sheet_half_thickness) + island_param * math::cos(delta_x / sheet_half_thickness);
         }
 
-        //! Bx: reversing field
-        Inline auto bx1(const coord_t<D>& x) const -> real_t
+        //! Bx: reversing / reconnecting field
+        //?  Bx_background = sinh(dy/L) / fadeev_denom
+        //?  dBx          = pert_bx_amplitude * cos(2*pi*dx/Lx) * sin(pi*dy/Ly)
+        Inline auto bx1(const coord_t<D>& x_Ph) const -> real_t
         {
-            const real_t Denom = Fadeev_denominator(x);
-            const real_t dx   = x[0] - cs_x;
-            const real_t dy   = x[1] - cs_y;
-            const real_t pert = dbx * math::cos(TWO * static_cast<real_t>(constant::PI) * dx / Lx)      //* δbx1 = dbx·cos(2π·dx/Lx)·sin(π·dy/Ly)
-                                    * math::sin(static_cast<real_t>(constant::PI) * dy / Ly);
+            const real_t fadeev_denom = fadeev_denominator(x_Ph);
+            const real_t delta_x      = x_Ph[0] - sheet_x_centre;
+            const real_t delta_y      = x_Ph[1] - sheet_y_centre;
 
-            return b0 * math::sinh(dy / L) / Denom + pert;          //* bx1_bg = b0·sinh(x2/L)/D
+            const real_t perturbation = pert_bx_amplitude * math::cos(TWO * static_cast<real_t>(constant::PI) * delta_x / Lx)
+                                                          * math::sin(static_cast<real_t>(constant::PI) * delta_y / Ly);
+
+            return math::sinh(delta_y / sheet_half_thickness) / fadeev_denom + perturbation;
         }
 
-        //! By: Reconnecting field
-        Inline auto bx2(const coord_t<D>& x) const -> real_t
+        //! By: connecting / streaming field
+        //?  By_background = island_param * sin(dx/L) / fadeev_denom
+        //?  dBy          = pert_by_amplitude * cos(pi*dy/Ly) * sin(2*pi*dx/Lx)
+        Inline auto bx2(const coord_t<D>& x_Ph) const -> real_t
         {
-            const real_t Denom = Fadeev_denominator(x);
-            const real_t dx   = x[0] - cs_x;
-            const real_t dy   = x[1] - cs_y;
-            const real_t pert = dby * math::cos(static_cast<real_t>(constant::PI) * dy / Ly)            //* δbx2 = dby·cos(π·dy/Ly)·sin(2π·dx/Lx)
-                                    * math::sin(TWO * static_cast<real_t>(constant::PI) * dx / Lx);
+            const real_t fadeev_denom = fadeev_denominator(x_Ph);
+            const real_t delta_x      = x_Ph[0] - sheet_x_centre;
+            const real_t delta_y      = x_Ph[1] - sheet_y_centre;
 
-            return b0 * eps * math::sin(dx / L) / Denom + pert;     //* bx2_bg = b0·ε·sin(x1/L)/D
+            const real_t perturbation = pert_by_amplitude * math::cos(static_cast<real_t>(constant::PI) * delta_y / Ly)
+                                                          * math::sin(TWO * static_cast<real_t>(constant::PI) * delta_x / Lx);
+
+            return island_param * math::sin(delta_x / sheet_half_thickness) / fadeev_denom + perturbation;
         }
 
         //! Bz: out-of-plane guide field
-        Inline auto bx3(const coord_t<D>& x) const -> real_t
+        //?  Bz = sqrt( (1 - island_param^2)/fadeev_denom^2 + guide_field_ratio^2 )
+        //?  guide_field_ratio = 0 by default  ->  reduces to force-free Bz = sqrt(1 - island_param^2)/fadeev_denom
+        Inline auto bx3(const coord_t<D>& x_Ph) const -> real_t
         {
-            const real_t Denom = Fadeev_denominator(x);
-            const real_t ome = ONE - eps * eps;   // (1 − ε²)
+            const real_t fadeev_denom        = fadeev_denominator(x_Ph);
+            const real_t one_minus_island_sq = ONE - island_param * island_param;   // (1 - island_param^2)
 
-            return b0 * math::sqrt(ome / (Denom * Denom) + bg * bg); //* bx3 = b0·√[(1−ε²)/D² + bg²]; = 0 by default → reduces to force-free bx3 = b0·√(1−ε²)/D
+            return math::sqrt(one_minus_island_sq / (fadeev_denom * fadeev_denom) + guide_field_ratio * guide_field_ratio);
         }
 
-        //!Electric field: zero at t = 0
+        //! Electric field: zero at t = 0
         Inline auto ex1(const coord_t<D>&) const -> real_t { return ZERO; }
         Inline auto ex2(const coord_t<D>&) const -> real_t { return ZERO; }
         Inline auto ex3(const coord_t<D>&) const -> real_t { return ZERO; }
 
-    private:
-        const real_t b0, bg, eps, L, Lx, Ly, dby, dbx, cs_x, cs_y;
-        
-        // eps     : Fadeev island parameter ε ∈ (0, 1)
-        //           ε = 0 → Harris sheet (no islands)
-        //           ε → 1 → maximally modulated islands
-        //           controls island size relative to sheet thickness L
-        // L       : current-layer half-thickness [code units = d]
-        //           sets the spatial scale of the equilibrium;
-        //           field and current gradients ~ 1/L
-        // Lx, Ly  : physical box dimensions [code units]
-        //           Lx = 4π·L for exactly 2 islands (periodic in x)
-        //           Ly = Lx/2, sets distance to PEC walls
-        // dby     : absolute perturbation amplitude δBy = dby_frac · b0
-        //           breaks translational symmetry along x, seeds island coalescence
-        // dbx     : perturbation amplitude δBx, derived from ∇·B = 0:
-        //           dbx = −dby · Lx / (2·Ly); ensures the perturbation is divergence-free
-        // cs_x    : x-coordinate of the box centre = (xmax + xmin) / 2
-        //           shifts the equilibrium from the origin to the grid centre
-        // cs_y    : y-coordinate of the box centre = (ymax + ymin) / 2
-        //           current sheet sits at y = cs_y (= 0 for a symmetric grid)
+        //*  Data members
+        real_t guide_field_ratio    { ZERO };   // B_guide in units of the unit field; 0 -> no guide field
+        real_t island_param         { ZERO };   // Fadeev island parameter eps in (0,1); 0 -> Harris sheet
+        real_t sheet_half_thickness { ONE  };   // current-layer half-thickness [code units = skindepth]
+        real_t Lx                   { ONE  };   // box dimension along sheet (x1)
+        real_t Ly                   { ONE  };   // box dimension normal to sheet (x2)
+        real_t sheet_x_centre       { ZERO };   // x-centre of the box = (xmax + xmin)/2
+        real_t sheet_y_centre       { ZERO };   // y-centre of the box = (ymax + ymin)/2
+        real_t pert_by_amplitude    { ZERO };   // dBy = perturbation_fraction (fraction of unit field)
+        real_t pert_bx_amplitude    { ZERO };   // dBx = -dBy * Lx/(2*Ly), from div(B) = 0
     };
 
-    //! ==========================================================
-    //! Problem generator
-    //! ==========================================================
+
+    //! =========================================================================
+    //!  PGen
+    //! =========================================================================
     template <SimEngine::type S, class M>
     struct PGen : public arch::ProblemGenerator<S, M>
     {
+        static constexpr auto engines    { traits::compatible_with<SimEngine::SRPIC>::value };
+        static constexpr auto metrics    { traits::compatible_with<Metric::Minkowski>::value };
+        static constexpr auto dimensions { traits::compatible_with<Dim::_2D, Dim::_3D>::value };
 
-        // Compatibility flags
-        static constexpr auto engines
-        {
-            traits::compatible_with<SimEngine::SRPIC>::value
-        };
-        static constexpr auto metrics
-        {
-            traits::compatible_with<Metric::Minkowski>::value
-        };
+        using Base            = arch::ProblemGenerator<S, M>;
+        using metadomain_type = Metadomain<S, M>;
 
-        // Island coalescence requires 2-D; 3-D could be added but is untested.
-        static constexpr auto dimensions
-        {
-            traits::compatible_with<Dim::_2D>::value
-        };
+        using Base::D;
+        using Base::C;
+        using Base::params;
 
-        using arch::ProblemGenerator<S, M>::D;
-        using arch::ProblemGenerator<S, M>::C;
-        using arch::ProblemGenerator<S, M>::params;
+        metadomain_type& global_domain;
 
-        Metadomain<S, M>& global_domain;
+    private:
+        real_t guide_field_ratio      { ZERO };
+        real_t island_param           { static_cast<real_t>(0.4)  };
+        real_t sheet_half_thickness   { static_cast<real_t>(64.0) };
+        real_t background_temperature { static_cast<real_t>(0.01) };
+        real_t perturbation_fraction  { static_cast<real_t>(-0.1) };
 
-        //* Domain geometry
-        const real_t global_xmin, global_xmax;      // x1 range
-        const real_t global_ymin, global_ymax;      // x2 range
-        const real_t Lx, Ly;                        // box dimensions
-        const real_t cs_x, cs_y;                    // box centre
-
-        //* Physics parameters
-        const real_t b0;                            // normalised asymptotic field strength
-        const real_t bg;                            // guide-field ratio: B_guide / b0
-        const real_t eps;                           // Fadeev island parameter  (0 < ε < 1)
-        const real_t sheet_L;                       // current-layer half-thickness  [code units = d]
-        const real_t temperature;                   // kT / (mc²) — relativistic temperature
-        const real_t dby_frac;                      // perturbation amplitude  |δBy| / b0
-
-        //* Normalisation scales
-        const real_t sigma0;                        // σ = (ωce/ωpe)²
-        const real_t skindepth0;                    // d (plasma skin depth) in physical (code) units
-
+    public:
         InitFields<D> init_flds;
 
-        //! Constructor
-        inline PGen(const SimulationParams& p, Metadomain<S, M>& global_domain) :
-            arch::ProblemGenerator<S, M> { p },
-            global_domain { global_domain },
-            global_xmin   { global_domain.mesh().extent(in::x1).first  },
-            global_xmax   { global_domain.mesh().extent(in::x1).second },
-            global_ymin   { global_domain.mesh().extent(in::x2).first  },
-            global_ymax   { global_domain.mesh().extent(in::x2).second },
-            Lx            { global_xmax - global_xmin },
-            Ly            { global_ymax - global_ymin },
-            cs_x          { HALF * (global_xmax + global_xmin) },
-            cs_y          { HALF * (global_ymax + global_ymin) },
-            b0            { p.template get<real_t>("setup.b0",       ONE)  },
-            bg            { p.template get<real_t>("setup.bg",       ZERO) },
-            eps           { p.template get<real_t>("setup.eps",      static_cast<real_t>(0.4)) },
-            sheet_L       { p.template get<real_t>("setup.sheet_L")        },
-            temperature   { p.template get<real_t>("setup.temperature")    },
-            dby_frac      { p.template get<real_t>("setup.dby_frac", static_cast<real_t>(-0.1)) },
-            sigma0        { p.template get<real_t>("scales.sigma0")        },
-            skindepth0    { p.template get<real_t>("scales.skindepth0")    },
-            init_flds     { b0, bg, eps, sheet_L, Lx, Ly, dby_frac, cs_x, cs_y }
-        {}
+        //!  Constructor
+        inline PGen(const SimulationParams& p, metadomain_type& md): Base { p }, global_domain { md }
+        {
+            guide_field_ratio      = p.template get<real_t>("setup.bg",          ZERO);
+            island_param           = p.template get<real_t>("setup.eps",         static_cast<real_t>(0.4));
+            sheet_half_thickness   = p.template get<real_t>("setup.sheet_L",     static_cast<real_t>(64.0));
+            background_temperature = p.template get<real_t>("setup.temperature", static_cast<real_t>(0.01));
+            perturbation_fraction  = p.template get<real_t>("setup.dby_frac",    static_cast<real_t>(-0.1));
+
+            const auto& mesh = md.mesh();
+            const real_t global_x_min = mesh.extent(in::x1).first;
+            const real_t global_x_max = mesh.extent(in::x1).second;
+            const real_t global_y_min = mesh.extent(in::x2).first;
+            const real_t global_y_max = mesh.extent(in::x2).second;
+            const real_t Lx = global_x_max - global_x_min;
+            const real_t Ly = global_y_max - global_y_min;
+
+            const real_t sheet_x_centre = HALF * (global_x_max + global_x_min);
+            const real_t sheet_y_centre = HALF * (global_y_max + global_y_min);
+
+            init_flds = InitFields<D>(guide_field_ratio,
+                                      island_param,
+                                      sheet_half_thickness,
+                                      Lx, Ly,
+                                      perturbation_fraction,
+                                      sheet_x_centre, sheet_y_centre);
+        }
 
         inline PGen() {}
 
-        //? Field initialisation (called at t = 0)
-        auto MatchFields(real_t) const -> InitFields<D> { return init_flds; }
+        auto MatchFields(simtime_t) const -> InitFields<D>
+        {
+            return init_flds;
+        }
 
-        //? Particle initialisation
         inline void InitPrtls(Domain<S, M>& domain)
         {
-            //* ──────────────────────────────────────────────────────────────────
-            //* Step 1 — Inject a uniform relativistic Maxwellian plasma.
-            //*
-            //* For a force-free current sheet, the pressure balance is magnetic,
-            //* so the particle density can be uniform (no sech² profile needed),
-            //* exactly as in the VPIC.
-            //* Both species start with zero bulk drift; drifts are added in Step 2.
-            //* ──────────────────────────────────────────────────────────────────
-            
-            const auto temperatures = std::make_pair(temperature, temperature);
-            const auto zero_drifts  = std::make_pair(std::vector<real_t> { ZERO, ZERO, ZERO }, std::vector<real_t> { ZERO, ZERO, ZERO });
+            //! STAGE 1: Inject a uniform relativistic Maxwellian plasma everywhere.
+            arch::InjectUniformMaxwellian<S, M>(params, domain, ONE, background_temperature, { 1, 2 });
 
-            boundaries_t<real_t> full_box;
-            for (auto d { 0u }; d < (unsigned int)M::Dim; ++d)
-                full_box.push_back(Range::All);
+            //!  STAGE 2: Drift boost
+            const real_t skindepth = params.template get<real_t>("scales.skindepth0");
+            const real_t larmor    = params.template get<real_t>("scales.larmor0");
+            const real_t sigma     = SQR(skindepth / larmor);                       //*   sigma = (skindepth0 / larmor0)^2
+            const auto& mesh       = domain.mesh;
 
-            arch::InjectUniformMaxwellians<S, M>(params, domain, ONE, temperatures, { 1, 2 }, zero_drifts, false, full_box);
+            // Local copies for device capture (members of *this and init_flds cannot be captured into a KOKKOS_LAMBDA directly)
+            const real_t guide_field_ratio_local    = init_flds.guide_field_ratio;
+            const real_t island_param_local         = init_flds.island_param;
+            const real_t sheet_half_thickness_local = init_flds.sheet_half_thickness;
+            const real_t sheet_x_centre             = init_flds.sheet_x_centre;
+            const real_t sheet_y_centre             = init_flds.sheet_y_centre;
 
-            //* ──────────────────────────────────────────────────────────────────
-            //* Step 2 — Apply the force-free current drift to each species.
-            //*
-            //* The Fadeev equilibrium requires J ∥ B everywhere (force-free
-            //* condition), giving three non-zero current components
-            //* (↔ VPIC JX, JY, JZ macros):
-            //*
-            //*   J_x3 = (b0/L)(1−ε²)/D²                     [primary, out-of-plane Z]
-            //*   J_x1 = J_x3 · sinh(x2/L) / F,   F = √[(1−ε²)+bg²D²]
-            //*   J_x2 = J_x3 · ε· sin(x1/L) / F
-            //*
-            //* In Entity normalisations (β = drift speed / c):
-            //*   β_ref = √σ · d · (1−ε²) / [2·L·D²]
-            //*                              ↑ factor 2: pair plasma, each species carries half the current
-            //*                              (analogous to VPIC's  VDY = −JY/2  for both-species current)
-            //*   β_x   = β_ref · sinh(x2/L) / F
-            //*   β_y   = β_ref · ε· sin(x1/L) / F
-            //*   β_z   = β_ref
-            //*
-            //* Because drift velocity ≪ vth (β_ref ~ 0.003 for fiducial parameters), the
-            //* simple momentum-kick approximation  u += q₀·β·γ  is accurate to
-            //* O(β²/vth²), which is identical to the boost employed in the VPIC deck.
-            //* ──────────────────────────────────────────────────────────────────
-            
-            const auto& mesh = domain.mesh;
-
-            // Capture scalars for GPU kernels
-            const real_t b0_     = b0;
-            const real_t bg_     = bg;
-            const real_t eps_    = eps;
-            const real_t L_      = sheet_L;
-            const real_t cs_x_   = cs_x;
-            const real_t cs_y_   = cs_y;
-            const real_t sigma0_ = sigma0;
-            const real_t d0_     = skindepth0;   // d in code units
-
-            for (auto s { 0u }; s < 2; ++s) 
+            for (auto s = 0u; s < domain.species.size(); ++s)
             {
-                auto& species = domain.species[s];
-                auto  i1      = species.i1;
-                auto  i2      = species.i2;
-                auto  dx1     = species.dx1;
-                auto  dx2     = species.dx2;
-                auto  tag     = species.tag;
-                auto  ux1     = species.ux1;
-                auto  ux2     = species.ux2;
-                auto  ux3     = species.ux3;
-                const real_t q0 = species.charge();   // −1 for e⁻, +1 for e⁺
+                auto& sp            = domain.species[s];
+                const real_t charge = sp.charge();      // assumed +-1 (electron-positron plasma)
 
-                Kokkos::parallel_for("FadeevCurrentDrift", species.rangeActiveParticles(), Lambda(index_t p)
+                // Extract Kokkos view handles before the lambda: the species object can't be
+                // copied into a GPU kernel, but its array handles (i1, ux1, ...) can
+                const auto cell_x = sp.i1;
+                const auto cell_y = sp.i2;
+                const auto frac_x = sp.dx1;
+                const auto frac_y = sp.dx2;
+                const auto tag    = sp.tag;
+                const auto ux1    = sp.ux1;
+                const auto ux2    = sp.ux2;
+                const auto ux3    = sp.ux3;
+
+                Kokkos::parallel_for("FadeevCurrentDrift", sp.rangeActiveParticles(), KOKKOS_LAMBDA(index_t p)
                 {
-                    if (tag(p) == ParticleTag::dead) { return; }
+                    if (tag(p) == ParticleTag::dead) return;
 
-                    //? Physical position
-                    coord_t<D> x_Ph { ZERO };
-                    {
-                        const real_t c1 = static_cast<real_t>(i1(p)) + static_cast<real_t>(dx1(p));
-                        const real_t c2 = static_cast<real_t>(i2(p)) + static_cast<real_t>(dx2(p));
-                        x_Ph[0] = mesh.metric.template convert<1, Crd::Cd, Crd::XYZ>(c1);
-                        x_Ph[1] = mesh.metric.template convert<2, Crd::Cd, Crd::XYZ>(c2);
-                    }
+                    // Physical position of particle
+                    const real_t x_Cd = static_cast<real_t>(cell_x(p)) + static_cast<real_t>(frac_x(p));
+                    const real_t y_Cd = static_cast<real_t>(cell_y(p)) + static_cast<real_t>(frac_y(p));
+                    const real_t x = mesh.metric.template convert<1, Crd::Cd, Crd::XYZ>(x_Cd);
+                    const real_t y = mesh.metric.template convert<2, Crd::Cd, Crd::XYZ>(y_Cd);
 
-                    const real_t dx = x_Ph[0] - cs_x_;   // offset from box centre (x1, X)
-                    const real_t dy = x_Ph[1] - cs_y_;   // offset from box centre (x2, Y)
+                    const real_t delta_x = x - sheet_x_centre;    // offset from box centre (x1, X)
+                    const real_t delta_y = y - sheet_y_centre;    // offset from box centre (x2, Y)
 
-                    //? Fadeev denominator and related quantities
-                    const real_t Denom = math::cosh(dy / L_) + eps_ * math::cos(dx / L_);
-                    const real_t ome = ONE - eps_ * eps_;                    // 1 − ε²
-                    const real_t F = math::sqrt(ome + bg_ * bg_ * Denom * Denom); // force-free norm
+                    //! ==================== Fadeev current J = ∇×B ==================== !//
 
-                    //? Drift amplitude
-                    const real_t beta_ref = math::sqrt(sigma0_) * d0_ * ome / (TWO * L_ * Denom * Denom);   //* β_ref = √σ₀ · dₑ · (1−ε²) / (2·L·D²)
+                    //? There is no motional ExB drift as the flux tubes are assumed to be
+                    //? stationary. They are "perturbed" to merge and coalesce.
 
-                    //? Component decomposition along J ∥ B direction
-                    const real_t beta_x = beta_ref * math::sinh(dy / L_) / F;
-                    const real_t beta_y = beta_ref * eps_ * math::sin(dx / L_) / F;
-                    const real_t beta_z = beta_ref;
+                    //* Fadeev denominator and force-free normalisation
+                    const real_t fadeev_denom = math::cosh(delta_y / sheet_half_thickness_local) + island_param_local * math::cos(delta_x / sheet_half_thickness_local);    // D = cosh(dy/L) + eps*cos(dx/L)
+                    const real_t one_minus_island_sq = ONE - SQR(island_param_local);                                                   // 1 - eps^2
+                    const real_t force_free_norm = math::sqrt(one_minus_island_sq + SQR(guide_field_ratio_local) * SQR(fadeev_denom));  // F = sqrt[ (1 - eps^2) + bg^2 * D^2 ]
 
-                    //? Lorentz factor of the drift
-                    const real_t beta_sq = beta_x * beta_x + beta_y * beta_y + beta_z * beta_z;
-                    
-                    //? Numerical safety: skip if drift is somehow superluminal
-                    if (beta_sq >= ONE) { return; }
-                    
-                    //? Apply momentum kick
-                    // q0 = −1 for electrons → receives −β kick
-                    // q0 = +1 for positrons → receives +β kick
-                    const real_t gd = ONE / math::sqrt(ONE - beta_sq);
-                    ux1(p) += q0 * beta_x * gd;
-                    ux2(p) += q0 * beta_y * gd;
-                    ux3(p) += q0 * beta_z * gd;
-                });
-            }
-        }
-    };
+                    //* Normalised analytic current (unit field amplitude in code units)
+                    const real_t Jz = one_minus_island_sq / (sheet_half_thickness_local * fadeev_denom * fadeev_denom);                 // Jz = (1/L)·(1−ε²)/D²
+                    const real_t Jx = Jz * math::sinh(delta_y / sheet_half_thickness_local) / force_free_norm;                          // Jx = Jz · sinh(y/L) / F,   F = √[(1−ε²)+bg²·D²]
+                    const real_t Jy = Jz * island_param_local * math::sin(delta_x / sheet_half_thickness_local) / force_free_norm;      // Jy = Jz · ε·sin(x/L) / F
+
+                    //! Current-driven drift: β = (1/2) · √σ · skindepth · J
+                    //TODO: Check factor 1/2 with dby_frac=0 : pair plasma, each species carries half the current
+                    //?   sign(q) (charge) is applied in the momentum kick below, not here
+                    const real_t drift_x = HALF * skindepth * math::sqrt(sigma) * Jx;
+                    const real_t drift_y = HALF * skindepth * math::sqrt(sigma) * Jy;
+                    const real_t drift_z = HALF * skindepth * math::sqrt(sigma) * Jz;
+
+                    //* Drift Lorentz factor;  |beta_d|^2 = beta_x^2 + beta_y^2 + beta_z^2
+                    const real_t drift_speed_squared = SQR(drift_x) + SQR(drift_y) + SQR(drift_z);
+
+                    //? Numerical safety: skip if the drift is somehow superluminal
+                    if (drift_speed_squared >= ONE) return;
+
+                    //! Momentum kick:  u += sign(q) * drift * gamma_drift
+                    const real_t lorentz_factor_drift = ONE / math::sqrt(ONE - drift_speed_squared);   //* gamma_d = 1/sqrt(1 - |beta_d|^2)
+                    ux1(p) += charge * drift_x * lorentz_factor_drift;
+                    ux2(p) += charge * drift_y * lorentz_factor_drift;
+                    ux3(p) += charge * drift_z * lorentz_factor_drift;
+
+                }); // parallel_for FadeevCurrentDrift
+
+            } // species loop
+
+        } // InitPrtls
+
+    }; // struct PGen
 
 } // namespace user
+
 #endif // PROBLEM_GENERATOR_H
+
+//! ============================================================================
+//!  OUTSTANDING CHECKS (TODO)
+//! ============================================================================
+//
+//TODO [factor 1/2]: Verify the both-species current split (HALF in drift_x/y/z).
+//      Entity does NOT apply any species current-sharing factor (the injector is
+//      called with zero drift; the drift is added here manually). Since Jx/Jy/Jz
+//      is the TOTAL force-free current (∇×B), each of the two species should carry
+//      half -> HALF is expected. BUT Camille's calibrated deck used NO 1/2 and gave
+//      correct results, which can only be reconciled if her J was already per-species.
+//      DECISIVE TEST: run with dby_frac = 0. A true force-free IC must stay static
+//      (B frozen, E ~ 0). Compare runs with and without the HALF; the one giving a
+//      static B is correct. (See drift block above.)
+//
+//TODO [kick vs boost]: The drift is applied as a first-order momentum kick
+//      (u += q*drift*gamma_d), NOT the full Maxwell-Juttner frame boost that VPIC
+//      performs. These agree only to O(beta_d^2 / vth^2). For fiducial parameters
+//      beta_d ~ 1e-3 and vth ~ 0.6, so the error is ~1e-5 (negligible). If higher
+//      fidelity is ever needed, replace the kick with the coordinate-free boost
+//      u' = u + [ (u . u_d)/(gamma_d + 1) + gamma_th ] * u_d,  u_d = gamma_d * beta_d
+//      (equivalent to VPIC's triad-decomposed boost, but degeneracy-free).
+//
+//TODO [Yee staggering]: Fields are evaluated as analytic POINT values at x_Ph.
+//      VPIC's set_region_field evaluates each B component at its own Yee-staggered
+//      location; Camille's reference deck reconstructs B from a finite-differenced
+//      vector potential Az for exact discrete div(B) = 0. Confirm whether Entity's
+//      MatchFields/field-setter passes each component its own staggered coordinate
+//      (then point-eval is fine) or a single cell-centred x_Ph (then either stagger
+//      manually or switch to the Az approach). Discrete div(B) is otherwise cleaned
+//      by the solver, but check the initial transient.
