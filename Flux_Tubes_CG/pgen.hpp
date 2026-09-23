@@ -144,105 +144,79 @@ namespace user
             Az_exterior = (tube_radius / alpha_t) * bessel_J0(alpha_t);
         }
 
-        //!  Bx = dAz/dy   (unchanged by layout — radially symmetric)
+        //! Az vector potential
+        //!  Inside tubes  : Az = (tube_radius / alpha_t) * J0(alpha_t * normalised_radius)
+        //!  Outside tubes : Az = Az_exterior = (tube_radius / alpha_t) * J0(alpha_t)   [constant]
+        KOKKOS_INLINE_FUNCTION
+        real_t Az(const coord_t<D>& x_Ph) const
+        {
+            const real_t x = x_Ph[0];
+            const real_t y = x_Ph[1];
+
+            const real_t normalised_radius_tube1 = math::sqrt(SQR(x - tube1_x_centre) + SQR(y - tube1_y_centre)) / tube_radius;
+
+            if (normalised_radius_tube1 < ONE)
+                return (tube_radius / alpha_t) * bessel_J0(alpha_t * normalised_radius_tube1);
+
+            if (!single_tube)
+            {
+                const real_t normalised_radius_tube2 = math::sqrt(SQR(x - tube2_x_centre) + SQR(y - tube2_y_centre)) / tube_radius;
+
+                if (normalised_radius_tube2 < ONE)
+                    return (tube_radius / alpha_t) * bessel_J0(alpha_t * normalised_radius_tube2);
+            }
+
+            return Az_exterior;
+        }
+
+        //!  Bx = dAz/dy
         KOKKOS_INLINE_FUNCTION
         real_t bx1(const coord_t<D>& x_Ph) const
         {
             const real_t x = x_Ph[0];
             const real_t y = x_Ph[1];
 
-            // Az(x, y + cell_width_y/2)
-            real_t Az_upper;
-            {
-                const real_t y_q = y + HALF * cell_width_y;
-                const real_t normalised_radius_tube1 = math::sqrt(SQR(x - tube1_x_centre) + SQR(y_q - tube1_y_centre)) / tube_radius;
-                const real_t normalised_radius_tube2 = math::sqrt(SQR(x - tube2_x_centre) + SQR(y_q - tube2_y_centre)) / tube_radius;
-                
-                if (normalised_radius_tube1 < ONE)
-                    Az_upper = (tube_radius / alpha_t) * bessel_J0(alpha_t * normalised_radius_tube1);
-                else if (!single_tube && normalised_radius_tube2 < ONE)
-                    Az_upper = (tube_radius / alpha_t) * bessel_J0(alpha_t * normalised_radius_tube2);
-                else
-                    Az_upper = Az_exterior;
-            }
+            coord_t<D> upper { x, y + HALF * cell_width_y };
+            coord_t<D> lower { x, y - HALF * cell_width_y };
 
-            // Az(x, y - cell_width_y/2)
-            real_t Az_lower;
-            {
-                const real_t y_q = y - HALF * cell_width_y;
-                const real_t normalised_radius_tube1 = math::sqrt(SQR(x - tube1_x_centre) + SQR(y_q - tube1_y_centre)) / tube_radius;
-                const real_t normalised_radius_tube2 = math::sqrt(SQR(x - tube2_x_centre) + SQR(y_q - tube2_y_centre)) / tube_radius;
-                
-                if (normalised_radius_tube1 < ONE)
-                    Az_lower = (tube_radius / alpha_t) * bessel_J0(alpha_t * normalised_radius_tube1);
-                else if (!single_tube && normalised_radius_tube2 < ONE)
-                    Az_lower = (tube_radius / alpha_t) * bessel_J0(alpha_t * normalised_radius_tube2);
-                else
-                    Az_lower = Az_exterior;
-            }
-
-            return (Az_upper - Az_lower) / cell_width_y;
+            return (Az(upper) - Az(lower)) / cell_width_y;
         }
 
-        //!  By = -dAz/dx   (unchanged by layout — radially symmetric)
+        //!  By = -dAz/dx
         KOKKOS_INLINE_FUNCTION
         real_t bx2(const coord_t<D>& x_Ph) const
         {
             const real_t x = x_Ph[0];
             const real_t y = x_Ph[1];
 
-            // Az(x - dx/2, y)
-            real_t Az_left;
-            {
-                const real_t x_q = x - HALF * cell_width_x;
-                const real_t normalised_radius_tube1 = math::sqrt(SQR(x_q - tube1_x_centre) + SQR(y - tube1_y_centre)) / tube_radius;
-                const real_t normalised_radius_tube2 = math::sqrt(SQR(x_q - tube2_x_centre) + SQR(y - tube2_y_centre)) / tube_radius;
-                
-                if (normalised_radius_tube1 < ONE)
-                    Az_left = (tube_radius / alpha_t) * bessel_J0(alpha_t * normalised_radius_tube1);
-                else if (!single_tube && normalised_radius_tube2 < ONE)
-                    Az_left = (tube_radius / alpha_t) * bessel_J0(alpha_t * normalised_radius_tube2);
-                else
-                    Az_left = Az_exterior;
-            }
+            coord_t<D> left  { x - HALF * cell_width_x, y };
+            coord_t<D> right { x + HALF * cell_width_x, y };
 
-            // Az(x + dx/2, y)
-            real_t Az_right;
-            {
-                const real_t x_q = x + HALF * cell_width_x;
-                const real_t normalised_radius_tube1 = math::sqrt(SQR(x_q - tube1_x_centre) + SQR(y - tube1_y_centre)) / tube_radius;
-                const real_t normalised_radius_tube2 = math::sqrt(SQR(x_q - tube2_x_centre) + SQR(y - tube2_y_centre)) / tube_radius;
-                
-                if (normalised_radius_tube1 < ONE)
-                    Az_right = (tube_radius / alpha_t) * bessel_J0(alpha_t * normalised_radius_tube1);
-                else if (!single_tube && normalised_radius_tube2 < ONE)
-                    Az_right = (tube_radius / alpha_t) * bessel_J0(alpha_t * normalised_radius_tube2);
-                else
-                    Az_right = Az_exterior;
-            }
-
-            return (Az_left - Az_right) / cell_width_x;
+            return (Az(left) - Az(right)) / cell_width_x;
         }
 
-        //! Bz (Guide field)   (unchanged by layout)
+        //! Bz (Guide field)
         //!  Inside tubes  : Bz = sqrt( J0(alpha_t*rn)^2 + guide_field_floor )
         //!  Outside tubes : Bz = sqrt( J0(alpha_t)^2    + guide_field_floor )
         KOKKOS_INLINE_FUNCTION
         real_t bx3(const coord_t<D>& x_Ph) const
         {
-            const real_t normalised_radius_tube1 = math::sqrt(SQR(x_Ph[0] - tube1_x_centre) + SQR(x_Ph[1] - tube1_y_centre)) / tube_radius;
-            
+            const real_t x = x_Ph[0];
+            const real_t y = x_Ph[1];
+
+            const real_t normalised_radius_tube1 = math::sqrt(SQR(x - tube1_x_centre) + SQR(y - tube1_y_centre)) / tube_radius;
+
             if (normalised_radius_tube1 < ONE)
                 return math::sqrt(SQR(bessel_J0(alpha_t * normalised_radius_tube1)) + guide_field_floor);
 
-            if (!single_tube) 
+            if (!single_tube)
             {
-                const real_t normalised_radius_tube2 = math::sqrt(SQR(x_Ph[0] - tube2_x_centre) + SQR(x_Ph[1] - tube2_y_centre)) / tube_radius;
-                
+                const real_t normalised_radius_tube2 = math::sqrt(SQR(x - tube2_x_centre) + SQR(y - tube2_y_centre)) / tube_radius;
+
                 if (normalised_radius_tube2 < ONE)
                     return math::sqrt(SQR(bessel_J0(alpha_t * normalised_radius_tube2)) + guide_field_floor);
             }
-            
+
             return math::sqrt(SQR(bessel_J0(alpha_t)) + guide_field_floor);
         }
 
@@ -257,20 +231,20 @@ namespace user
         KOKKOS_INLINE_FUNCTION
         real_t ex2(const coord_t<D>& x_Ph) const
         {
-            if (kick_velocity == ZERO) return ZERO;
+            // if (kick_velocity == ZERO) return ZERO;
 
-            const real_t normalised_radius_tube1 = math::sqrt(SQR(x_Ph[0] - tube1_x_centre) + SQR(x_Ph[1] - tube1_y_centre)) / tube_radius;
+            // const real_t normalised_radius_tube1 = math::sqrt(SQR(x_Ph[0] - tube1_x_centre) + SQR(x_Ph[1] - tube1_y_centre)) / tube_radius;
             
-            if (normalised_radius_tube1 < ONE)
-                return +kick_velocity * math::sqrt(SQR(bessel_J0(alpha_t * normalised_radius_tube1)) + guide_field_floor);
+            // if (normalised_radius_tube1 < ONE)
+            //     return +kick_velocity * math::sqrt(SQR(bessel_J0(alpha_t * normalised_radius_tube1)) + guide_field_floor);
 
-            if (!single_tube) 
-            {
-                const real_t normalised_radius_tube2 = math::sqrt(SQR(x_Ph[0] - tube2_x_centre) + SQR(x_Ph[1] - tube2_y_centre)) / tube_radius;
+            // if (!single_tube) 
+            // {
+            //     const real_t normalised_radius_tube2 = math::sqrt(SQR(x_Ph[0] - tube2_x_centre) + SQR(x_Ph[1] - tube2_y_centre)) / tube_radius;
                 
-                if (normalised_radius_tube2 < ONE)
-                    return -kick_velocity * math::sqrt(SQR(bessel_J0(alpha_t * normalised_radius_tube2)) + guide_field_floor);
-            }
+            //     if (normalised_radius_tube2 < ONE)
+            //         return -kick_velocity * math::sqrt(SQR(bessel_J0(alpha_t * normalised_radius_tube2)) + guide_field_floor);
+            // }
 
             return ZERO;    // Outside of flux tubes
         }
@@ -283,55 +257,58 @@ namespace user
         {
             if (kick_velocity == ZERO) return ZERO;
 
-            const real_t x = x_Ph[0];
-            const real_t y = x_Ph[1];
+            // const real_t x = x_Ph[0];
+            // const real_t y = x_Ph[1];
 
-            const real_t normalised_radius_tube1 = math::sqrt(SQR(x - tube1_x_centre) + SQR(y - tube1_y_centre)) / tube_radius;
-            real_t normalised_radius_tube2 = static_cast<real_t>(2.0);   // >=1: tube 2 absent (single_tube mode)
+            // const real_t normalised_radius_tube1 = math::sqrt(SQR(x - tube1_x_centre) + SQR(y - tube1_y_centre)) / tube_radius;
+            // real_t normalised_radius_tube2 = static_cast<real_t>(2.0);   // >=1: tube 2 absent (single_tube mode)
             
-            if (!single_tube)
-                normalised_radius_tube2 = math::sqrt(SQR(x - tube2_x_centre) + SQR(y - tube2_y_centre)) / tube_radius;
+            // if (!single_tube)
+            //     normalised_radius_tube2 = math::sqrt(SQR(x - tube2_x_centre) + SQR(y - tube2_y_centre)) / tube_radius;
 
-            //* Ez outside tubes = 0 
-            if (normalised_radius_tube1 >= ONE && normalised_radius_tube2 >= ONE)
-                return ZERO;
+            // //* Ez outside tubes = 0 
+            // if (normalised_radius_tube1 >= ONE && normalised_radius_tube2 >= ONE)
+            //     return ZERO;
 
-            // Az(x - dx/2, y)
-            real_t Az_left;
-            {
-                const real_t x_q = x - HALF * cell_width_x;
-                const real_t normalised_radius_tube1 = math::sqrt(SQR(x_q - tube1_x_centre) + SQR(y - tube1_y_centre)) / tube_radius;
-                const real_t normalised_radius_tube2 = math::sqrt(SQR(x_q - tube2_x_centre) + SQR(y - tube2_y_centre)) / tube_radius;
+            // // Az(x - dx/2, y)
+            // real_t Az_left;
+            // {
+            //     const real_t x_q = x - HALF * cell_width_x;
+            //     const real_t normalised_radius_tube1 = math::sqrt(SQR(x_q - tube1_x_centre) + SQR(y - tube1_y_centre)) / tube_radius;
+            //     const real_t normalised_radius_tube2 = math::sqrt(SQR(x_q - tube2_x_centre) + SQR(y - tube2_y_centre)) / tube_radius;
                 
-                if (normalised_radius_tube1 < ONE)
-                    Az_left = (tube_radius / alpha_t) * bessel_J0(alpha_t * normalised_radius_tube1);
-                else if (!single_tube && normalised_radius_tube2 < ONE)
-                    Az_left = (tube_radius / alpha_t) * bessel_J0(alpha_t * normalised_radius_tube2);
-                else
-                    Az_left = Az_exterior;
-            }
+            //     if (normalised_radius_tube1 < ONE)
+            //         Az_left = (tube_radius / alpha_t) * bessel_J0(alpha_t * normalised_radius_tube1);
+            //     else if (!single_tube && normalised_radius_tube2 < ONE)
+            //         Az_left = (tube_radius / alpha_t) * bessel_J0(alpha_t * normalised_radius_tube2);
+            //     else
+            //         Az_left = Az_exterior;
+            // }
 
-            // Az(x + dx/2, y)
-            real_t Az_right;
-            {
-                const real_t x_q = x + HALF * cell_width_x;
-                const real_t normalised_radius_tube1 = math::sqrt(SQR(x_q - tube1_x_centre) + SQR(y - tube1_y_centre)) / tube_radius;
-                const real_t normalised_radius_tube2 = math::sqrt(SQR(x_q - tube2_x_centre) + SQR(y - tube2_y_centre)) / tube_radius;
+            // // Az(x + dx/2, y)
+            // real_t Az_right;
+            // {
+            //     const real_t x_q = x + HALF * cell_width_x;
+            //     const real_t normalised_radius_tube1 = math::sqrt(SQR(x_q - tube1_x_centre) + SQR(y - tube1_y_centre)) / tube_radius;
+            //     const real_t normalised_radius_tube2 = math::sqrt(SQR(x_q - tube2_x_centre) + SQR(y - tube2_y_centre)) / tube_radius;
                 
-                if (normalised_radius_tube1 < ONE)
-                    Az_right = (tube_radius / alpha_t) * bessel_J0(alpha_t * normalised_radius_tube1);
-                else if (!single_tube && normalised_radius_tube2 < ONE)
-                    Az_right = (tube_radius / alpha_t) * bessel_J0(alpha_t * normalised_radius_tube2);
-                else
-                    Az_right = Az_exterior;
-            }
+            //     if (normalised_radius_tube1 < ONE)
+            //         Az_right = (tube_radius / alpha_t) * bessel_J0(alpha_t * normalised_radius_tube1);
+            //     else if (!single_tube && normalised_radius_tube2 < ONE)
+            //         Az_right = (tube_radius / alpha_t) * bessel_J0(alpha_t * normalised_radius_tube2);
+            //     else
+            //         Az_right = Az_exterior;
+            // }
 
-            //* By = -dAz/dx = (Az(x - dx/2) - Az(x + dx/2)) / dx
-            const real_t By = (Az_left - Az_right) / cell_width_x;
+            // //* By = -dAz/dx = (Az(x - dx/2) - Az(x + dx/2)) / dx
+            // const real_t By = (Az_left - Az_right) / cell_width_x;
 
-            if (normalised_radius_tube1 < ONE)
-                return -kick_velocity * By;      // tube 1 (left)
-            return +kick_velocity * By;          // tube 2 (right)
+            // if (normalised_radius_tube1 < ONE)
+            //     return -kick_velocity * By;      // tube 1 (left)
+            // return +kick_velocity * By;          // tube 2 (right)
+
+            //! Remove
+            return ZERO;
         }
 
         //*  Data members
@@ -349,6 +326,54 @@ namespace user
     };
 
 
+    template <SimEngine::type S, class M>
+    void J_CurlB(Domain<S, M>& domain)
+    {
+        constexpr auto D = M::Dim;
+        const auto em = domain.fields.em;
+        const auto cur = domain.fields.cur;
+
+        //* Active cell counts (ghost cells are excluded from the write range;
+        //* they get filled by the subsequent CommunicateFields call)
+        const auto n_active_x = domain.mesh.n_active(in::x1);
+        const auto n_active_y = domain.mesh.n_active(in::x2);
+
+        if constexpr (D == Dim::_2D)
+        {
+            Kokkos::parallel_for("J_CurlB", CreateRangePolicy<Dim::_2D>({ N_GHOSTS, N_GHOSTS }, 
+            { N_GHOSTS + n_active_x,  N_GHOSTS + n_active_y }), KOKKOS_LAMBDA(index_t i1, index_t i2)
+            {
+                //* Jx = dBz/dy - dBy/dz
+                cur(i1, i2, cur::jx1) = em(i1, i2, em::bx3) - em(i1, i2 - 1, em::bx3);
+
+                //* Jy = dBx/dz - dBz/dx
+                cur(i1, i2, cur::jx2) = em(i1 - 1, i2, em::bx3) - em(i1, i2, em::bx3);
+
+                //* Jz = dBy/dx - dBx/dy
+                cur(i1, i2, cur::jx3) = em(i1, i2, em::bx2) - em(i1 - 1, i2, em::bx2) - em(i1, i2, em::bx1) + em(i1, i2 - 1, em::bx1);
+            });
+        }
+        // else if constexpr (D == Dim::_3D)
+        // {
+        //     const auto n_active_z = domain.mesh.n_active(in::x3);
+
+        //     Kokkos::parallel_for("J_CurlB", CreateRangePolicy<Dim::_3D>({ N_GHOSTS, N_GHOSTS, N_GHOSTS },
+        //     { N_GHOSTS + n_active_x, N_GHOSTS + n_active_y, N_GHOSTS + n_active_z }), KOKKOS_LAMBDA(index_t i1, index_t i2, index_t i3)
+        //     {
+        //         //* Jx = dBz/dy - dBy/dz
+        //         current_field(i1, i2, i3, 0) = (em(i1, i2, i3, em::bx3) - em(i1, i2 - 1, i3, em::bx3)) - (em(i1, i2, i3, em::bx2) - em(i1, i2, i3 - 1, em::bx2));
+
+        //         //* Jy = dBx/dz - dBz/dx
+        //         current_field(i1, i2, i3, 1) = (em(i1, i2, i3, em::bx1) - em(i1, i2, i3 - 1, em::bx1)) - (em(i1, i2, i3, em::bx3) - em(i1 - 1, i2, i3, em::bx3));
+
+        //         //* Jz = dBy/dx - dBx/dy
+        //         current_field(i1, i2, i3, 2) = (em(i1, i2, i3, em::bx2) - em(i1 - 1, i2, i3, em::bx2)) - (em(i1, i2, i3, em::bx1) - em(i1, i2 - 1, i3, em::bx1));
+        //     });
+        // }
+        else
+            raise::Error("J_CurlB: only 2D and 3D supported", HERE);
+    }
+
     //! =========================================================================
     //!  PGen
     //! =========================================================================
@@ -357,7 +382,8 @@ namespace user
     {
         static constexpr auto engines    { traits::compatible_with<SimEngine::SRPIC>::value };
         static constexpr auto metrics    { traits::compatible_with<Metric::Minkowski>::value };
-        static constexpr auto dimensions { traits::compatible_with<Dim::_2D, Dim::_3D>::value };
+        // static constexpr auto dimensions { traits::compatible_with<Dim::_2D, Dim::_3D>::value };
+        static constexpr auto dimensions { traits::compatible_with<Dim::_2D>::value };
 
         using Base            = arch::ProblemGenerator<S, M>;
         using metadomain_type = Metadomain<S, M>;
@@ -403,8 +429,8 @@ namespace user
             const real_t dy = Ly / static_cast<real_t>(mesh.n_active(in::x2));
 
             init_flds = InitFields<D>(tube_radius,
-                                      domain_x_centre - tube_radius, domain_y_centre,   // Tube 1 (left):  (Lx/2 - tube_radius, Ly/2)
-                                      domain_x_centre + tube_radius, domain_y_centre,   // Tube 2 (right): (Lx/2 + tube_radius, Ly/2)
+                                      domain_x_centre - tube_radius, domain_y_centre,           // Tube 1 (left):  (Lx/2 - tube_radius, Ly/2)
+                                      domain_x_centre + tube_radius, domain_y_centre,           // Tube 2 (right): (Lx/2 + tube_radius, Ly/2)
                                       dx, dy, guide_field_floor, kick_velocity, single_tube);
         }
 
@@ -415,16 +441,54 @@ namespace user
             return init_flds;
         }
 
+        //! Smooth selected components of domain.fields.em, n_passes times.
+        //! comps: any subset of { em::ex1..ex3, em::bx1..bx3 }
+        //! 2D only (matches DigitalFilter_kernel bulk stencil; periodic BCs assumed).
+        void smooth_fields(Domain<S, M>& domain, const std::vector<unsigned short>& comps, int n_passes)
+        {
+            const auto nx = domain.mesh.n_active(in::x1);
+            const auto ny = domain.mesh.n_active(in::x2);
+
+            auto buff = ndfield_t<D, 6>("em_smooth_buff", domain.fields.em.extent(0), domain.fields.em.extent(1));
+
+            for (int pass = 0; pass < n_passes; ++pass)
+            {
+                Kokkos::deep_copy(buff, domain.fields.em);
+                const auto em = domain.fields.em;   //* capture Views by value
+                const auto bf = buff;
+
+                for (auto c : comps)
+                {
+                    Kokkos::parallel_for("SmoothEM", CreateRangePolicy<Dim::_2D>({ N_GHOSTS, N_GHOSTS }, { N_GHOSTS + nx, N_GHOSTS + ny }), KOKKOS_LAMBDA(index_t i, index_t j)
+                    {
+                        em(i, j, c) = INV_4  *  bf(i, j, c) + INV_8  * (bf(i - 1, j, c) + bf(i + 1, j, c) + bf(i, j - 1, c) + bf(i, j + 1, c))
+                                    + INV_16 * (bf(i - 1, j - 1, c) + bf(i + 1, j + 1, c) + bf(i - 1, j + 1, c) + bf(i + 1, j - 1, c));
+                    });
+                }
+
+                global_domain.CommunicateFields(domain, Comm::E | Comm::B);
+            }
+        }
+
         inline void InitPrtls(Domain<S, M>& domain)
         {
-            //! STAGE 1: Initialise uniform thermal plasma everywhere
+            //! STAGE 1: Smooth E and B fields (before computing J from B)
+            global_domain.CommunicateFields(domain, Comm::E | Comm::B);
+            // smooth_fields(domain, { em::bx1, em::bx2, em::bx3, em::ex1, em::ex2, em::ex3 }, 64);
+
+            //! STAGE 2: J = curl(B) from the smoothed grid fields
+            Kokkos::deep_copy(domain.fields.cur, ZERO);
+            J_CurlB(domain);
+            // global_domain.CommunicateFields(domain, Comm::J);
+
+            //! STAGE 3: Initialise uniform thermal plasma everywhere
             arch::InjectUniformMaxwellian<S, M>(params, domain, ONE, background_temperature, { 1, 2 });
 
-            //!  STAGE 2: Drift boost
+            //!  STAGE 4: Drift boost
             const real_t skindepth = params.template get<real_t>("scales.skindepth0");
             const real_t larmor    = params.template get<real_t>("scales.larmor0");
             const real_t sigma     = SQR(skindepth / larmor);                       //*   sigma = (skindepth0 / larmor0)^2
-            const auto& mesh       = domain.mesh;
+            const auto mesh        = domain.mesh;
 
             // Local copies for device capture (members of *this and init_flds cannot be captured into a KOKKOS_LAMBDA directly)
             const real_t tube_radius          = init_flds.tube_radius;
@@ -440,6 +504,7 @@ namespace user
             const bool   do_charge_correction = charge_correction;
             const real_t Az_exterior          = init_flds.Az_exterior;
             constexpr real_t alpha_t          = InitFields<D>::alpha_t;
+            const auto J_grid                 = domain.fields.cur;
 
             for (auto s = 0u; s < domain.species.size(); ++s)
             {
@@ -471,46 +536,55 @@ namespace user
                     //! ==================== J = ∇ x B ==================== !//
                     real_t Jx = ZERO, Jy = ZERO, Jz = ZERO;
                     {
-                        const real_t delta_x_1 = x - tube1_x_centre;
-                        const real_t delta_y_1 = y - tube1_y_centre;
-                        const real_t radial_distance_1 = math::sqrt(SQR(delta_x_1) + SQR(delta_y_1));
-                        const real_t normalised_radius_tube1 = radial_distance_1 / tube_radius;
+                        //* Grid indices of the particle's host cell, offset into the ghosted field array
+                        const int cell_index_x = static_cast<int>(cell_x(p)) + static_cast<int>(N_GHOSTS);
+                        const int cell_index_y = static_cast<int>(cell_y(p)) + static_cast<int>(N_GHOSTS);
 
-                        const real_t delta_x_2 = x - tube2_x_centre;
-                        const real_t delta_y_2 = y - tube2_y_centre;
-                        const real_t radial_distance_2 = math::sqrt(SQR(delta_x_2) + SQR(delta_y_2));
-                        const real_t normalised_radius_tube2 = radial_distance_2 / tube_radius;
+                        //* Fractional position of the particle within its cell, in [0, 1)s
+                        const real_t frac_x_prtl = static_cast<real_t>(frac_x(p));
+                        const real_t frac_y_prtl = static_cast<real_t>(frac_y(p));
 
-                        const real_t axis_epsilon = static_cast<real_t>(1e-10) * tube_radius;
+                        //* Cell shift for half-staggered ("dual") components.
+                        //* A dual quantity sits at i + 1/2, so the two cells bracketing the particle are
+                        //* (i - 1) and (i) when frac < 0.5, and (i) and (i + 1) when frac >= 0.5.
+                        const int stagger_shift_x = static_cast<int>(frac_x_prtl + HALF);
+                        const int stagger_shift_y = static_cast<int>(frac_y_prtl + HALF);
 
-                        if (normalised_radius_tube1 < ONE && radial_distance_1 > axis_epsilon)
-                        {   
-                            //* Compute J in flux tube 1
-                            const real_t J0_value = bessel_J0(alpha_t * normalised_radius_tube1);
-                            const real_t J1_value = bessel_J1(alpha_t * normalised_radius_tube1);
-                            const real_t Bz_local = math::sqrt(SQR(J0_value) + floor_local);
-                            
-                            //* J_phi(r) = -dBz/dr = (alpha_t / R) * J0 * J1 / Bz
-                            const real_t J_phi = (alpha_t / tube_radius) * J0_value * J1_value / Bz_local;
-                            
-                            Jx = -J_phi * delta_y_1/radial_distance_1;    // -J_phi(r) * (y - yc) / r
-                            Jy = +J_phi * delta_x_1/radial_distance_1;    //  J_phi(r) * (x - xc) / r
-                            Jz = (alpha_t / tube_radius) * J0_value;      // (alpha_t / R) * J0(alpha_t * r/R)
-                        }
-                        else if (!single_tube_local && normalised_radius_tube2 < ONE && radial_distance_2 > axis_epsilon)
-                        {   
-                            //* Compute J in flux tube 2
-                            const real_t J0_value = bessel_J0(alpha_t * normalised_radius_tube2);
-                            const real_t J1_value = bessel_J1(alpha_t * normalised_radius_tube2);
-                            const real_t Bz_local = math::sqrt(SQR(J0_value) + floor_local);
-                            
-                            //* J_phi(r) = -dBz/dr = (alpha_t / R) * J0 * J1 / Bz
-                            const real_t J_phi = (alpha_t / tube_radius) * J0_value * J1_value / Bz_local;
-                            
-                            Jx = -J_phi * delta_y_2/radial_distance_2;    // -J_phi(r) * (y - yc) / r
-                            Jy = +J_phi * delta_x_2/radial_distance_2;    //  J_phi(r) * (x - xc) / r
-                            Jz = (alpha_t / tube_radius) * J0_value;      // (alpha_t / R) * J0(alpha_t * r/R)
-                        }
+                        //* Linear weights for node-centred ("primal") components, located at i
+                        const real_t weight_primal_x_lo = ONE - frac_x_prtl;
+                        const real_t weight_primal_x_hi = frac_x_prtl;
+                        const real_t weight_primal_y_lo = ONE - frac_y_prtl;
+                        const real_t weight_primal_y_hi = frac_y_prtl;
+
+                        //* Linear weights for half-staggered ("dual") components, located at i + 1/2
+                        const real_t weight_dual_x_lo = static_cast<real_t>(stagger_shift_x + 1) - (frac_x_prtl + HALF);
+                        const real_t weight_dual_x_hi = ONE - weight_dual_x_lo;
+                        const real_t weight_dual_y_lo = static_cast<real_t>(stagger_shift_y + 1) - (frac_y_prtl + HALF);
+                        const real_t weight_dual_y_hi = ONE - weight_dual_y_lo;
+
+                        //* Partial sums after interpolating along x, at the lower and upper y-neighbours
+                        real_t J_at_y_lo, J_at_y_hi;
+
+                        //! Jx : dual in x, primal in y  (same Yee slot as ex1)
+                        J_at_y_lo = J_grid(cell_index_x - 1 + stagger_shift_x, cell_index_y,     0) * weight_dual_x_lo
+                                + J_grid(cell_index_x     + stagger_shift_x, cell_index_y,     0) * weight_dual_x_hi;
+                        J_at_y_hi = J_grid(cell_index_x - 1 + stagger_shift_x, cell_index_y + 1, 0) * weight_dual_x_lo
+                                + J_grid(cell_index_x     + stagger_shift_x, cell_index_y + 1, 0) * weight_dual_x_hi;
+                        Jx = J_at_y_lo * weight_primal_y_lo + J_at_y_hi * weight_primal_y_hi;
+
+                        //! Jy : primal in x, dual in y  (same Yee slot as ex2)
+                        J_at_y_lo = J_grid(cell_index_x,     cell_index_y - 1 + stagger_shift_y, 1) * weight_primal_x_lo
+                                + J_grid(cell_index_x + 1, cell_index_y - 1 + stagger_shift_y, 1) * weight_primal_x_hi;
+                        J_at_y_hi = J_grid(cell_index_x,     cell_index_y     + stagger_shift_y, 1) * weight_primal_x_lo
+                                + J_grid(cell_index_x + 1, cell_index_y     + stagger_shift_y, 1) * weight_primal_x_hi;
+                        Jy = J_at_y_lo * weight_dual_y_lo + J_at_y_hi * weight_dual_y_hi;
+
+                        //! Jz : primal in x, primal in y  (same Yee slot as ex3)
+                        J_at_y_lo = J_grid(cell_index_x,     cell_index_y,     2) * weight_primal_x_lo
+                                + J_grid(cell_index_x + 1, cell_index_y,     2) * weight_primal_x_hi;
+                        J_at_y_hi = J_grid(cell_index_x,     cell_index_y + 1, 2) * weight_primal_x_lo
+                                + J_grid(cell_index_x + 1, cell_index_y + 1, 2) * weight_primal_x_hi;
+                        Jz = J_at_y_lo * weight_primal_y_lo + J_at_y_hi * weight_primal_y_hi;
                     }
 
                     //! Current-driven drift velocity, β = J * sqrt(sigma) * skindepth * sign(q)
@@ -519,64 +593,64 @@ namespace user
                     real_t drift_y = skindepth * math::sqrt(sigma) * charge * Jy;
                     real_t drift_z = skindepth * math::sqrt(sigma) * charge * Jz;
 
-
+                    
                     //! ==================== E x B drift ==================== !//
-                    if (kick_local != ZERO)
-                    {
-                        const real_t normalised_radius_tube1 = math::sqrt(SQR(x - tube1_x_centre) + SQR(y - tube1_y_centre)) / tube_radius;
-                        real_t normalised_radius_tube2 = static_cast<real_t>(2.0);   // >=1: tube 2 absent (single_tube mode)
-                        if (!single_tube_local)
-                            normalised_radius_tube2 = math::sqrt(SQR(x - tube2_x_centre) + SQR(y - tube2_y_centre)) / tube_radius;
+                    // if (kick_local != ZERO)
+                    // {
+                    //     const real_t normalised_radius_tube1 = math::sqrt(SQR(x - tube1_x_centre) + SQR(y - tube1_y_centre)) / tube_radius;
+                    //     real_t normalised_radius_tube2 = static_cast<real_t>(2.0);   // >=1: tube 2 absent (single_tube mode)
+                    //     if (!single_tube_local)
+                    //         normalised_radius_tube2 = math::sqrt(SQR(x - tube2_x_centre) + SQR(y - tube2_y_centre)) / tube_radius;
 
-                        if (normalised_radius_tube1 < ONE || normalised_radius_tube2 < ONE)
-                        {
-                            // Bz at particle = sqrt( J0(alpha_t * r/R)^2 + floor )
-                            real_t Bz;
-                            if (normalised_radius_tube1 < ONE)
-                                Bz = math::sqrt(SQR(bessel_J0(alpha_t * normalised_radius_tube1)) + floor_local);
-                            else
-                                Bz = math::sqrt(SQR(bessel_J0(alpha_t * normalised_radius_tube2)) + floor_local);
+                    //     if (normalised_radius_tube1 < ONE || normalised_radius_tube2 < ONE)
+                    //     {
+                    //         // Bz at particle = sqrt( J0(alpha_t * r/R)^2 + floor )
+                    //         real_t Bz;
+                    //         if (normalised_radius_tube1 < ONE)
+                    //             Bz = math::sqrt(SQR(bessel_J0(alpha_t * normalised_radius_tube1)) + floor_local);
+                    //         else
+                    //             Bz = math::sqrt(SQR(bessel_J0(alpha_t * normalised_radius_tube2)) + floor_local);
 
-                            // By at particle = (Az(x-dx/2) - Az(x+dx/2)) / dx   [= -dAz/dx]
-                            real_t Az_left;
-                            {
-                                const real_t x_q = x - HALF * cell_width_x;
-                                const real_t rq1 = math::sqrt(SQR(x_q - tube1_x_centre) + SQR(y - tube1_y_centre)) / tube_radius;
-                                const real_t rq2 = math::sqrt(SQR(x_q - tube2_x_centre) + SQR(y - tube2_y_centre)) / tube_radius;
+                    //         // By at particle = (Az(x-dx/2) - Az(x+dx/2)) / dx   [= -dAz/dx]
+                    //         real_t Az_left;
+                    //         {
+                    //             const real_t x_q = x - HALF * cell_width_x;
+                    //             const real_t rq1 = math::sqrt(SQR(x_q - tube1_x_centre) + SQR(y - tube1_y_centre)) / tube_radius;
+                    //             const real_t rq2 = math::sqrt(SQR(x_q - tube2_x_centre) + SQR(y - tube2_y_centre)) / tube_radius;
                                 
-                                if (rq1 < ONE)
-                                    Az_left = (tube_radius / alpha_t) * bessel_J0(alpha_t * rq1);
-                                else if (!single_tube_local && rq2 < ONE)
-                                    Az_left = (tube_radius / alpha_t) * bessel_J0(alpha_t * rq2);
-                                else
-                                    Az_left = Az_exterior;
-                            }
-                            real_t Az_right;
-                            {
-                                const real_t x_q = x + HALF * cell_width_x;
-                                const real_t rq1 = math::sqrt(SQR(x_q - tube1_x_centre) + SQR(y - tube1_y_centre)) / tube_radius;
-                                const real_t rq2 = math::sqrt(SQR(x_q - tube2_x_centre) + SQR(y - tube2_y_centre)) / tube_radius;
+                    //             if (rq1 < ONE)
+                    //                 Az_left = (tube_radius / alpha_t) * bessel_J0(alpha_t * rq1);
+                    //             else if (!single_tube_local && rq2 < ONE)
+                    //                 Az_left = (tube_radius / alpha_t) * bessel_J0(alpha_t * rq2);
+                    //             else
+                    //                 Az_left = Az_exterior;
+                    //         }
+                    //         real_t Az_right;
+                    //         {
+                    //             const real_t x_q = x + HALF * cell_width_x;
+                    //             const real_t rq1 = math::sqrt(SQR(x_q - tube1_x_centre) + SQR(y - tube1_y_centre)) / tube_radius;
+                    //             const real_t rq2 = math::sqrt(SQR(x_q - tube2_x_centre) + SQR(y - tube2_y_centre)) / tube_radius;
                                 
-                                if (rq1 < ONE)
-                                    Az_right = (tube_radius / alpha_t) * bessel_J0(alpha_t * rq1);
-                                else if (!single_tube_local && rq2 < ONE)
-                                    Az_right = (tube_radius / alpha_t) * bessel_J0(alpha_t * rq2);
-                                else
-                                    Az_right = Az_exterior;
-                            }
-                            const real_t By = (Az_left - Az_right) / cell_width_x;
+                    //             if (rq1 < ONE)
+                    //                 Az_right = (tube_radius / alpha_t) * bessel_J0(alpha_t * rq1);
+                    //             else if (!single_tube_local && rq2 < ONE)
+                    //                 Az_right = (tube_radius / alpha_t) * bessel_J0(alpha_t * rq2);
+                    //             else
+                    //                 Az_right = Az_exterior;
+                    //         }
+                    //         const real_t By = (Az_left - Az_right) / cell_width_x;
 
-                            //* Motional E at particle
-                            //*     Tube 1 (left) : Ey = +kick*Bz, Ez = -kick*By
-                            //*     Tube 2 (right): Ey = -kick*Bz, Ez = +kick*By
-                            real_t Ey, Ez;
-                            if (normalised_radius_tube1 < ONE)  { Ey = +kick_local * Bz;  Ez = -kick_local * By; }
-                            else                                { Ey = -kick_local * Bz;  Ez = +kick_local * By; }
+                    //         //* Motional E at particle
+                    //         //*     Tube 1 (left) : Ey = +kick*Bz, Ez = -kick*By
+                    //         //*     Tube 2 (right): Ey = -kick*Bz, Ez = +kick*By
+                    //         real_t Ey, Ez;
+                    //         if (normalised_radius_tube1 < ONE)  { Ey = +kick_local * Bz;  Ez = -kick_local * By; }
+                    //         else                                { Ey = -kick_local * Bz;  Ez = +kick_local * By; }
 
-                            //! Motional drift velocity = (Ey*Bz - Ez*By) / (By^2 + Bz^2)
-                            drift_x = drift_x + (Ey * Bz - Ez * By) / (By * By + Bz * Bz);
-                        }
-                    }
+                    //         //! Motional drift velocity = (Ey*Bz - Ez*By) / (By^2 + Bz^2)
+                    //         drift_x = drift_x + (Ey * Bz - Ez * By) / (By * By + Bz * Bz);
+                    //     }
+                    // }
 
                     // Safety clamp on |drift| at 0.99 to stay device-safe
                     real_t drift_speed_squared = drift_x * drift_x + drift_y * drift_y + drift_z * drift_z;
@@ -617,42 +691,42 @@ namespace user
 
                     //! Charge-density weight correction
                     //    w_new = w * (1 + rho0 * sqrt(sigma)*skindepth * sign(q))
-                    if (do_charge_correction && kick_local != ZERO)
-                    {
-                        // Ey at (x, y + dy/2)
-                        real_t Ey_upper;
-                        {
-                            const real_t y_q = y + HALF * cell_width_y;
-                            const real_t rq1 = math::sqrt(SQR(x - tube1_x_centre) + SQR(y_q - tube1_y_centre)) / tube_radius;
-                            const real_t rq2 = math::sqrt(SQR(x - tube2_x_centre) + SQR(y_q - tube2_y_centre)) / tube_radius;
-                            if (rq1 < ONE)
-                                Ey_upper = +kick_local * math::sqrt(SQR(bessel_J0(alpha_t * rq1)) + floor_local);
-                            else if (!single_tube_local && rq2 < ONE)
-                                Ey_upper = -kick_local * math::sqrt(SQR(bessel_J0(alpha_t * rq2)) + floor_local);
-                            else
-                                Ey_upper = ZERO;
-                        }
+                    // if (do_charge_correction && kick_local != ZERO)
+                    // {
+                    //     // Ey at (x, y + dy/2)
+                    //     real_t Ey_upper;
+                    //     {
+                    //         const real_t y_q = y + HALF * cell_width_y;
+                    //         const real_t rq1 = math::sqrt(SQR(x - tube1_x_centre) + SQR(y_q - tube1_y_centre)) / tube_radius;
+                    //         const real_t rq2 = math::sqrt(SQR(x - tube2_x_centre) + SQR(y_q - tube2_y_centre)) / tube_radius;
+                    //         if (rq1 < ONE)
+                    //             Ey_upper = +kick_local * math::sqrt(SQR(bessel_J0(alpha_t * rq1)) + floor_local);
+                    //         else if (!single_tube_local && rq2 < ONE)
+                    //             Ey_upper = -kick_local * math::sqrt(SQR(bessel_J0(alpha_t * rq2)) + floor_local);
+                    //         else
+                    //             Ey_upper = ZERO;
+                    //     }
 
-                        // Ey at (x, y - dy/2)
-                        real_t Ey_lower;
-                        {
-                            const real_t y_q = y - HALF * cell_width_y;
-                            const real_t rq1 = math::sqrt(SQR(x - tube1_x_centre) + SQR(y_q - tube1_y_centre)) / tube_radius;
-                            const real_t rq2 = math::sqrt(SQR(x - tube2_x_centre) + SQR(y_q - tube2_y_centre)) / tube_radius;
-                            if (rq1 < ONE)
-                                Ey_lower = +kick_local * math::sqrt(SQR(bessel_J0(alpha_t * rq1)) + floor_local);
-                            else if (!single_tube_local && rq2 < ONE)
-                                Ey_lower = -kick_local * math::sqrt(SQR(bessel_J0(alpha_t * rq2)) + floor_local);
-                            else
-                                Ey_lower = ZERO;
-                        }
+                    //     // Ey at (x, y - dy/2)
+                    //     real_t Ey_lower;
+                    //     {
+                    //         const real_t y_q = y - HALF * cell_width_y;
+                    //         const real_t rq1 = math::sqrt(SQR(x - tube1_x_centre) + SQR(y_q - tube1_y_centre)) / tube_radius;
+                    //         const real_t rq2 = math::sqrt(SQR(x - tube2_x_centre) + SQR(y_q - tube2_y_centre)) / tube_radius;
+                    //         if (rq1 < ONE)
+                    //             Ey_lower = +kick_local * math::sqrt(SQR(bessel_J0(alpha_t * rq1)) + floor_local);
+                    //         else if (!single_tube_local && rq2 < ONE)
+                    //             Ey_lower = -kick_local * math::sqrt(SQR(bessel_J0(alpha_t * rq2)) + floor_local);
+                    //         else
+                    //             Ey_lower = ZERO;
+                    //     }
 
-                        const real_t rho0 = Ey_upper - Ey_lower;   // per-cell div(E) = dEy/dy
+                    //     const real_t rho0 = Ey_upper - Ey_lower;   // per-cell div(E) = dEy/dy
 
-                        const real_t new_weight = weight(p) * (ONE + rho0 * skindepth * math::sqrt(sigma) * charge);
-                        if (new_weight > ZERO)
-                            weight(p) = new_weight;
-                    }
+                    //     const real_t new_weight = weight(p) * (ONE + rho0 * skindepth * math::sqrt(sigma) * charge);
+                    //     if (new_weight > ZERO)
+                    //         weight(p) = new_weight;
+                    // }
 
                 }); // parallel_for FluxTubeDrift
 
@@ -665,5 +739,3 @@ namespace user
 } // namespace user
 
 #endif // PROBLEM_GENERATOR_H
-
-//TODO: Implement "nsmooth" smoothing from Tristan
