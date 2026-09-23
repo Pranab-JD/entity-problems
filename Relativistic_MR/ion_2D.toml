@@ -1,0 +1,118 @@
+###! Relativistic Harris Sheet for ION-ELECTRON plasma, 2D.
+###! Mass ratio = 1836; sigma_ion = sigma0/mass_ratio; theta_e = theta_i*mass_ratio.
+###! Geometry (reversal across Y): inflow=Y, outflow=X. Axis map x,y -> x1,x2.
+###!   X (x1): OPEN (outflow leaves the box)
+###!   Y (x2): REFLECTING (default) or INJECTION (toggle setup.inject_y)
+###! Lengths in d_i (ion skin depth = 1 code-length unit; d_e = d_i/sqrt(mr)).
+
+[simulation]
+	name    = "/scratch/project_465002528/pjd/RMR_ion_2D_open/RMR"
+	engine  = "srpic"
+	runtime = 100.0
+
+	[simulation.domain]
+		decomposition = [-1, -1]
+
+[grid]
+	resolution = [3500, 3500]
+	extent     = [[0.0, 55.0], [0.0, 55.0]]
+
+	[grid.metric]
+		metric = "minkowski"
+
+	[grid.boundaries]
+    	###* PERIODIC-X, REFLECTION-Y
+        # fields    = [["PERIODIC"], 	["CONDUCTOR", "CONDUCTOR"]]
+		# particles = [["PERIODIC"], 	["REFLECT",   "REFLECT"]]
+		
+        ###* OPEN-X, REFLECTION-Y
+        fields    = [["MATCH", 	"MATCH"], 	["CONDUCTOR", "CONDUCTOR"]]
+		particles = [["ABSORB", "ABSORB"], 	["REFLECT",   "REFLECT"]]
+
+		###* OPEN-X, INJECTION-Y (also setup.inject_y=true and ds=[[2.0], [2.0]])
+		###?   fields    = [["MATCH","MATCH"], ["MATCH","MATCH"]]
+		###?   particles = [["ABSORB","ABSORB"], ["ABSORB","ABSORB"]]
+
+		[grid.boundaries.match]
+			ds = [[5.0], []]              ###* x1 (X): 2.5 d_i both walls; x2 (Y): none
+
+
+[scales]
+    ###! sigma_ion = (skindepth0/larmor0)^2 / mass_ratio
+    skindepth0 = 0.023338                 #* d_e = d_i/sqrt(mass_ratio), d_i = 1 code unit
+    larmor0    = 0.000544662              #* larmor0 = skindepth0/sqrt(sigma_ion*mass_ratio)
+
+
+[algorithms]
+  	current_filters = 4
+
+	[algorithms.timestep]
+		CFL = 0.5
+
+
+[particles]
+	ppc0 = 16.0
+
+	[[particles.species]]                 ###* species 1 = electrons
+		label    = "e-"
+		mass     = 1.0
+		charge   = -1.0
+		maxnpart = 5e7
+
+	[[particles.species]]                 ###* species 2 = ions (mass = mass ratio -> pgen reads mr)
+		label    = "p+"
+		mass     = 1836.0
+		charge   = 1.0
+		maxnpart = 5e7
+
+
+[setup]
+	cs_density        = 5.0               ###* current-sheet overdensity = n_CS/n_BG
+	cs_width          = 0.5               ###* half-thickness in d_i
+	guide_field       = 0.0               ###* guide_field / B_in-plane
+	bg_theta_i        = 0.01              ###* background ion temperature, theta_i = kT/(m_i c^2)
+
+	###? Y-boundary mode: MUST match [grid.boundaries] x2 choice above.
+	inject_y          = false             ###* false=reflecting Y (default); true=injection
+	inj_ypad          = 2.5               ###* injection only: standoff from y-walls (d_i)
+
+	###? Turbulent perturbation
+	turb_amp          = 0.0               ###* if 0, the following turbulence params are ignored
+	turb_seed         = 12345
+	kmin              = 1
+	kmax              = 2
+	turb_plane        = 0                 ###* 2D: only plane 0 (xy) is meaningful
+	spectral_index    = 1.6667
+
+
+[output]
+    format   = "BPFile"
+
+    [output.fields]
+        quantities  = ["N", "B", "E", "J"]
+        interval    = 500
+
+    [output.particles]
+        enable      = false
+
+    [output.spectra]
+        enable      = true
+        e_min       = 1e-5
+        e_max       = 1e6
+        log_bins    = true
+        n_bins      = 4400
+        interval    = 500
+    
+    [output.stats]
+        quantities  = ["B^2", "E^2", "ExB", "J.E", "Rho", "T00"]
+        interval    = 200
+
+
+[diagnostics]
+    interval  = 2000
+    log_level = "WARNING"
+
+
+[checkpoint]
+    interval = 15000
+    keep     = 1

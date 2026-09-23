@@ -1,0 +1,123 @@
+###! Entity input: relativistic SINGLE Harris ion-electron, port of the iPIC3D
+###! relativistic reconnection case (one current sheet). Geometry (reversal
+###! across Y): inflow=Y, outflow=X, guide=Z. Axis map iPIC3D x,y,z -> x1,x2,x3.
+###!   X (x1): OPEN  (outflow leaves the box)
+###!   Y (x2): REFLECTING (default) or INJECTION (toggle setup.inject_y)
+###!   Z (x3): PERIODIC (guide)
+###! Lengths in d_i. Box 55^3 (Bacchini L convention), sheet at Y centre.
+###! DEFAULT 3D; also runs in 2D (drop the x3 entries in resolution/extent/boundaries).
+
+[simulation]
+  name    = "rel_single_harris"
+  engine  = "srpic"
+  runtime = 40.0                        ###! iPIC3D: dt=0.2 * ncycles=200 = 40
+
+  [simulation.domain]
+    decomposition = [-1, -1, -1]        ###! let Entity pick MPI split (2D: [-1,-1])
+
+[grid]
+  resolution = [512, 512, 512]          ###! nx1,nx2,nx3  (2D: [512, 512])
+  extent     = [[0.0, 55.0], [0.0, 55.0], [0.0, 55.0]]   ###! Lx,Ly,Lz in d_i (2D: drop 3rd)
+
+  [grid.metric]
+    metric = "minkowski"
+
+  ###! -------------------------------------------------------------------
+  ###! BOUNDARIES.  X (x1): open outflow -- fields MATCH, particles ABSORB.
+  ###!              Y (x2): inflow -- REFLECTING default (CONDUCTOR/REFLECT).
+  ###!                      For INJECTION set setup.inject_y=true AND switch the
+  ###!                      x2 entries to MATCH/ABSORB (see commented alternative).
+  ###!              Z (x3): guide -- PERIODIC.
+  ###! The pgen ALWAYS opens X in CustomPostStep; keep x1 = MATCH/ABSORB here.
+  ###! -------------------------------------------------------------------
+  [grid.boundaries]
+    fields    = [["MATCH", "MATCH"], ["CONDUCTOR", "CONDUCTOR"], ["PERIODIC"]]
+    particles = [["ABSORB", "ABSORB"], ["REFLECT", "REFLECT"], ["PERIODIC"]]
+    ###! INJECTION-Y alternative (also set setup.inject_y=true, and ds -> [[5.0],[5.0],[]]):
+    ###!   fields    = [["MATCH","MATCH"], ["MATCH","MATCH"], ["PERIODIC"]]
+    ###!   particles = [["ABSORB","ABSORB"], ["ABSORB","ABSORB"], ["PERIODIC"]]
+    ###! 2D (no guide axis): drop the third ["PERIODIC"] entry from each line.
+
+    [grid.boundaries.match]
+      ###! ds = absorbing/matching-layer thickness (d_i) at each open wall, one
+      ###! inner list PER AXIS (must match dimensionality): [v]=both walls, [v1,v2]
+      ###! =lower/upper, []=no layer (non-MATCH axis). Only x1 is open here.
+      ds = [[5.0], [], []]              ###! x1: 5 d_i both walls; x2,x3: none (2D: drop 3rd)
+
+###! ---------------------------------------------------------------------
+###! SCALES (electron/fiducial). These DEFINE the ion magnetization; sigma_ion
+###! is NOT an input. Entity's electron-referenced sigma0 = (skindepth0/larmor0)^2,
+###! and the pgen sets sigma_ion = sigma0 / mass_ratio.
+###!
+###! REGENERATE when you change mass_ratio (mr) or sigma_ion, with box in d_i:
+###!     skindepth0 = 1 / sqrt(mr)                 ###! electron skin depth; d_i := 1
+###!     larmor0    = skindepth0 / sqrt(sigma_ion * mr)
+###!   Equivalently: skindepth0/larmor0 = sqrt(sigma_ion * mr) = sqrt(sigma0).
+###!
+###! Examples (sigma_ion = 0.1):
+###!     mr=1836 -> skindepth0=0.02334, larmor0=0.001722   (ion-electron)
+###!     mr=1    -> skindepth0=1.0,     larmor0=3.16228     (pair plasma)
+###!   Also set [[particles.species]] mass (species 2) = mr, and label "e+" if mr=1.
+###!   VERIFY B_BG = sqrt(sigma_ion) ~ 0.316 in the startup log.
+###! ---------------------------------------------------------------------
+[scales]
+  larmor0    = 0.001722                 ###! = skindepth0 / sqrt(sigma_ion*mass_ratio)
+  skindepth0 = 0.02334                  ###! electron skin depth = 1/sqrt(mass_ratio), d_i=1
+
+[algorithms]
+  current_filters = 8                   ###! = iPIC3D num_smoothings (start lower for turbulence)
+
+  [algorithms.timestep]
+    CFL = 0.5
+
+[particles]
+  ppc0 = 8.0                            ###! iPIC3D: 2*2*2 per species per cell
+  use_weights = true                    ###! required by outflow replenishment (open BC)
+
+  [[particles.species]]                 ###! species 1 = electrons
+    label    = "e-"
+    mass     = 1.0
+    charge   = -1.0
+    maxnpart = 5e7
+
+  [[particles.species]]                 ###! species 2 = ions
+    label    = "i+"
+    mass     = 1836.0                   ###! ION mass = mass ratio m_i/m_e. Pgen reads THIS as mr.
+    charge   = 1.0
+    maxnpart = 5e7
+
+###! ---------------------------------------------------------------------
+[setup]
+  ###! sigma_ion is DERIVED from [scales] (= (skindepth0/larmor0)^2 / mass_ratio),
+  ###! not set here. custom_parameter 1 (sigma=0.1) is encoded in [scales] above.
+  ###! mass_ratio is DERIVED from species masses (species-2 mass / species-1 mass);
+  ###! there is no setup.mass_ratio. Change the ION mass in [[particles.species]] #2.
+  cs_density        = 5.0               ###! custom_parameter 2 (alpha)
+  cs_width          = 0.5               ###! custom_parameter 3 (half-thickness, d_i)
+  guide_field       = 0.1               ###! custom_parameter 4
+
+  ###! Y-boundary mode: MUST match [grid.boundaries] x2 choice above.
+  ###! Y-boundary mode: MUST match [grid.boundaries] x2 choice above.
+  inject_y          = false             ###! false=reflecting Y (default); true=injection (needs x2 MATCH/ABSORB)
+  inj_ypad          = 2.75              ###! injection only: replenish standoff from y-walls (d_i); ~0.05*Ly
+
+  ###! Background temperature (Bacchini et al. 2025): physical T_e = T_i.
+  ###! Set ONLY the ion dimensionless temperature theta_i = kT/(m_i c^2); the
+  ###! pgen derives theta_e = theta_i * mass_ratio (= 18.36 at mr=1836), which
+  ###! is Entity's per-species Maxwellian temperature for the electrons. This
+  ###! guarantees equal physical T and matches iPIC3D uth = (18.36, 0.01).
+  bg_theta_i        = 0.01              ###! theta_i,0 = kT_i/(m_i c^2); paper value
+
+  turb_seed         = 12345             ###! custom_parameter 5
+  turb_amp          = 0.1               ###! custom_parameter 6 (dB/B0 per component)
+  kmin              = 1                 ###! custom_parameter 7
+  kmax              = 8                 ###! custom_parameter 8
+  turb_plane        = 1                 ###! custom_parameter 9 (0=xy,1=yz,2=zx)
+  spectral_index    = 1.6667            ###! custom_parameter 10 (Kolmogorov)
+
+[output]
+  format        = "hdf5"
+  interval_time = 20.0                  ###! iPIC3D FieldOutputCycle=100 * dt=0.2 = 20
+
+  [output.fields]
+    quantities = ["N_1", "N_2", "E", "B", "J", "T0i_1", "T0i_2"]
