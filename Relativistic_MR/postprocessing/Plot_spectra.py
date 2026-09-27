@@ -9,8 +9,8 @@ LIGHT-CROSSING TIMES of the box along X
 
 Usage
 -----
-    spectra="/scratch/project_465002528/pjd/RMR_ie_2D/spectra"
-    output="/scratch/project_465002528/pjd/RMR_ie_2D/plots"
+    spectra="/scratch/project_465002528/pjd/RMR_2D/spectra"
+    output="/scratch/project_465002528/pjd/RMR_2D/plots"
 
     srun python3 -u Plot_spectra.py "$spectra" "$output"            # ion-electron
     srun python3 -u Plot_spectra.py "$spectra" "$output" --pair     # pair plasma
