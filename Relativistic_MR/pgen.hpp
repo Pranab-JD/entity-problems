@@ -264,11 +264,15 @@ namespace user
             //* B_BG = sqrt(sigma_ion)
             g.B_BG = (real_t)std::sqrt((double)g.sigma_ion);
 
-            const real_t beta_d = g.B_BG / ((real_t)2.0 * g.cs_density * g.cs_width);
+            //* The injector splits number_density across BOTH species so the
+            //* PER-SPECIES peak sheet density is cs_density/2, not cs_density
+            const real_t n_per = (real_t)0.5 * g.cs_density;
+
+            const real_t beta_d = g.B_BG / ((real_t)2.0 * n_per * g.cs_width);
             const real_t gamma_d = ONE / (real_t)std::sqrt(1.0 - (double)(beta_d * beta_d));
             g.drift_u = beta_d * gamma_d;
 
-            g.T_cs_i = (g.B_BG * g.B_BG) * gamma_d / ((real_t)4.0 * g.cs_density);          //* theta_i^CS
+            g.T_cs_i = (g.B_BG * g.B_BG) * gamma_d / ((real_t)4.0 * n_per);                 //* theta_i^CS
             g.T_cs_e = g.T_cs_i * g.mass_ratio;                                             //* theta_e^CS = theta_i^CS * mass ratio
 
             g.T_bg_i = g.params.template get<real_t>("setup.bg_theta_i", (real_t)0.01);     //* theta_i^BG
@@ -393,8 +397,8 @@ namespace user
             //*   upstream thermal   P_th  = 2 * n_bg * theta_b        (2 species)
             //*   CS thermal (peak)  P_cs  = 2 * n_CS * theta_d / gamma_d   (co-moving, both species)
             const real_t P_mag = B_BG * B_BG / (real_t)2.0;
-            const real_t P_th  = (real_t)2.0 * T_bg_i;                                                      //* n_bg=1 per species (pair: both theta_b)
-            const real_t P_cs  = (real_t)2.0 * cs_density * T_cs_i / gamma_d;                               //* n_CS=cs_density, both species
+            const real_t P_th  = T_bg_i;                                                                    //* n_bg=1 per species (pair: both theta_b)
+            const real_t P_cs  = cs_density * T_cs_i / gamma_d;                                             //* n_CS=cs_density, both species
             const real_t plasma_beta = P_th / P_mag;                                                        //* upstream thermal / magnetic pressure
 
             constexpr int LW1 = 34; 
