@@ -9,6 +9,11 @@ Usage
     out="/scratch/.../RMR/plots"
     srun python3 -u ../postprocessing/Spectra_SF.py "$fields" "$out"     # compute + plot
     python3 ../postprocessing/Spectra_SF.py "$fields" "$out"             # replot (REPLOT_FROM_CACHE=True)
+
+Structure functions follow Hu et al. (2026), arXiv:2512.12516:
+    SF_2(dr) = < |f(x + dr) - f(x)|^2 >          (vector increment, all 3 components)
+and it is SQRT(SF_2) that is plotted, so the Kolmogorov reference slope is 1/3
+(velocity-like) and the magnetic reference is ~2/3
 """
 
 import os
@@ -40,40 +45,77 @@ TIME_KEY      = "Time"          #! Entity time variable/attribute
 B_COMPS       = ["fB1", "fB2", "fB3"]   #! magnetic vector components
 J_COMPS       = ["fJ1", "fJ2", "fJ3"]   #! current vector components
 
-SF_ORDER      = 4               #! structure-function order (even; reference fast path)
-SF_N_LAGS     = 40              #! number of geometrically-spaced lags
-SF_MIN_LAG    = 1               #! smallest lag (cells)  -- raise toward the filter/gyro scale if noisy
-SF_MAX_FRAC   = 0.5             #! largest lag as a fraction of Nx (x is periodic)
+#! ---- structure functions (Hu+2026 convention) ----
+SF_ORDER      = 2               #! DESCRIPTIVE ONLY -- sf2_x/sf2_y hardcode the 2nd
+                                #! order. Changing this does NOT change the maths;
+                                #! it is written to the cache purely as a label.
+SF_N_LAGS     = 40              #! number of geometrically-spaced lags (per direction)
+SF_MIN_LAG    = 1               #! smallest lag (cells) -- raise toward the filter/gyro scale if noisy
+SF_MAX_FRAC   = 0.5             #! largest x-lag as a fraction of Nx (x is periodic -> roll)
+SF_Y_MAX_FRAC = 0.5             #! largest y-lag as a fraction of the SLAB height (y is NOT periodic)
 CS_SLAB_FRAC  = 0.5             #! TOTAL y-fraction, centred on the sheet (Ly/2). Set 1.0 for whole box.
 
+#! Hu+2026 restrict to a "reconnection region" defined by a particle-mixing
+#! criterion (both inflow populations >= 1% of local density). That needs
+#! origin-tagged particles, which these dumps do not carry, so CS_SLAB_FRAC is a
+#! fixed-slab PROXY for it -- a rectangular box rather than a mixing surface.
+#! Consequence: the slab still contains un-reconnected upstream plasma near its
+#! y-edges, which the paper's mask would have excluded.
+
+SF_DETREND_Y  = True            #! subtract <f>_x(y) before the y-increments.
+                                #! ALONG X this changes nothing (a per-row constant
+                                #! cancels in the increment), but ALONG Y it removes
+                                #! the Harris equilibrium B_x(y) = B0 tanh(...), which
+                                #! would otherwise dominate SF_y at every lag. The
+                                #! paper achieves the same end via its region mask.
+                                #! Set False to see the raw (equilibrium-dominated) y-SF.
+
+SF_FIT_RANGE  = (2.0, 30.0)     #! lag window [d0] for the reported log-log slope.
+                                #! Hu+2026 fit 2-30 d_e. CHECK this is inside your
+                                #! resolved range: below the current-filter scale the
+                                #! slope is numerical, not physical.
+
 FILE_STRIDE   = 5               #! process every Nth snapshot (1 = all)   [COMPUTE stage]
+                                #! The FIRST and LAST files are force-included below,
+                                #! whatever this is set to.
 CMAP          = "jet"           #! time colormap
 ONE_SIDED     = True            #! double interior modes for a one-sided PSD
 
 SPEC_SLOPE_GUIDE = -2.5         #! faint reference slope on the spectra (None to disable)
 
-REPLOT_FROM_CACHE = True        #! True -> skip compute, redraw from CACHE_NAME (run serially)
-CACHE_NAME        = "spectra_sf_cache.npz"
+REPLOT_FROM_CACHE = False        #! True -> skip compute, redraw from CACHE_NAME (run serially)
+CACHE_NAME        = "spectra_sf2_cache.npz"   #! NOTE: renamed -- the old sf4 cache has a
+                                              #! different key set and will not load here.
 
 #! ---- which cached snapshots to DRAW (plot-only; does not affect compute/cache) ----
-PLOT_STRIDE = 5                #! e.g. 4 -> draw every 4th cached snapshot (None or 1 = all)
+PLOT_STRIDE = 2                #! e.g. 4 -> draw every 4th cached snapshot (None or 1 = all)
 PLOT_TIMES  = None              #! e.g. [0.5, 1.0, 2.0] -> nearest cached snapshot to each t c/Lx
                                 #!      (overrides PLOT_STRIDE when set)
 COLOR_ABSOLUTE_TIME = True      #! True -> colorbar spans the FULL cached time range, so a colour
                                 #!         means the same t whether or not neighbours are drawn.
                                 #! False -> colorbar spans only the drawn subset.
 
-PLOT_TRANGE = (0.5, 3)         #! draw only snapshots with t c/Lx in this window; None = open end
-                                #!   e.g. (None, 2.0) -> up to t=2 ; (1.0, 3.0) -> a window ; (None,None) -> all
+PLOT_TRANGE = (0.5, 3)          #! t c/Lx window; None = open end. This sets BOTH the drawn
+                                #! range AND which snapshot the quoted slope comes from: the
+                                #! latest cached one at or below the upper bound (force-included
+                                #! even if PLOT_STRIDE skipped it). Raise the upper bound to
+                                #! report a later time.
 COLORBAR_FILL_WINDOW = True     #! only if COLOR_ABSOLUTE_TIME: True -> colormap fills the DRAWN window
                                 #!   (max contrast within it); False -> colours stay keyed to the full cached range
 
 SPEC_XLIM = (7e-3, 3e1)     #! k-range for BOTH spectra panels, e.g. (2e-2, 3.0)
 EB_YLIM   = (1e-8, 1e0)      #! E_B(k) y-range
 EJ_YLIM   = (1e-7, 1e-1)     #! E_J(k) y-range
-SF_XLIM   = (None, None)     #! lag-range for BOTH SF panels, e.g. (0.1, 100)
-SFB_YLIM  = (None, None)     #! SF4 dB y-range
-SFJ_YLIM  = (None, None)     #! SF4 J  y-range
+SF_XLIM   = (None, None)     #! lag-range for ALL SF panels, e.g. (0.1, 100)
+SFB_YLIM  = (None, None)     #! sqrt(SF2) dB y-range
+SFJ_YLIM  = (None, None)     #! sqrt(SF2) J  y-range
+
+SF_PLOT_J = False               #! PLOT-ONLY: False -> draw the dB row alone (2 panels).
+                                #! J is still computed and cached either way, so this can
+                                #! be flipped and redrawn with REPLOT_FROM_CACHE=True.
+
+SF_GUIDES = [(1.0 / 3.0, "--",  r"$1/3$"),      #! Kolmogorov (velocity-like) reference
+             (2.0 / 3.0, "-.",  r"$2/3$")]      #! magnetic reference seen by Hu+2026
 
 #! ---- vertical reference lines at characteristic scales (read from Simulation_params.txt, in d0) ----
 #! set a length to None to skip that line. On SPECTRA the line sits at the WAVENUMBER of that
@@ -121,16 +163,36 @@ def add_scale_lines(ax, kind):
         ax.axvline(pos, color=color, ls=SCALE_LINE_STYLE, lw=1.2, alpha=0.85,
                    label=SCALE_LABELS.get(name, name))
 
+def fit_loglog_slope(lag, s, lo, hi):
+    """Least-squares log-log slope of s(lag) over lag in [lo, hi]. NaN if too few points."""
+    lag = np.asarray(lag, dtype=np.float64)
+    s   = np.asarray(s,   dtype=np.float64)
+    m   = np.isfinite(s) & (s > 0) & (lag >= lo) & (lag <= hi)
+    if m.sum() < 3:
+        return float("nan")
+    return float(np.polyfit(np.log10(lag[m]), np.log10(s[m]), 1)[0])
+
 #! ============================================================
 #! Plotting (shared by the compute path and the replot path)
 #! ============================================================
-def plot_all(times, k, lag_d, E_B_all, E_J_all, sf_B_all, sf_J_all):
-    times   = np.asarray(times)
-    E_B_all = np.asarray(E_B_all); E_J_all = np.asarray(E_J_all)
-    sf_B_all = np.asarray(sf_B_all); sf_J_all = np.asarray(sf_J_all)
+def plot_all(times, k, lag_x, lag_y, E_B_all, E_J_all,
+             sfx_B_all, sfx_J_all, sfy_B_all, sfy_J_all):
+    times     = np.asarray(times)
+    E_B_all   = np.asarray(E_B_all);   E_J_all   = np.asarray(E_J_all)
+    sfx_B_all = np.asarray(sfx_B_all); sfx_J_all = np.asarray(sfx_J_all)
+    sfy_B_all = np.asarray(sfy_B_all); sfy_J_all = np.asarray(sfy_J_all)
 
     #! full time range BEFORE subsetting (for absolute-time colours)
     t_full_min, t_full_max = float(times.min()), float(times.max())
+
+    #! ---- keep the FIRST cached snapshot aside -------------------------
+    #! Its slope is printed, but it is NOT drawn: it is the pre-turbulent
+    #! baseline, and on a log axis it sits decades below the rest and would
+    #! collapse the y-range of every panel. (results were sorted by time
+    #! before caching, so index 0 is the earliest.)
+    t_first     = float(times[0])
+    sfx_B_first = sfx_B_all[0].copy(); sfx_J_first = sfx_J_all[0].copy()
+    sfy_B_first = sfy_B_all[0].copy(); sfy_J_first = sfy_J_all[0].copy()
 
     #! ---- choose which snapshots to draw ----
     if PLOT_TIMES is not None:
@@ -140,18 +202,29 @@ def plot_all(times, k, lag_d, E_B_all, E_J_all, sf_B_all, sf_J_all):
     else:
         sel = np.arange(len(times))
 
-    #! restrict to a time window (composes with the stride/times selection above)
+    #! restrict to the PLOT_TRANGE window (composes with the stride/times selection)
     lo = -np.inf if PLOT_TRANGE[0] is None else PLOT_TRANGE[0]
     hi =  np.inf if PLOT_TRANGE[1] is None else PLOT_TRANGE[1]
     sel = sel[(times[sel] >= lo) & (times[sel] <= hi)]
-    if sel.size == 0:
-        raise SystemExit(f"No snapshots in PLOT_TRANGE={PLOT_TRANGE} "
-                         f"(cached range {times.min():.3g}..{times.max():.3g})")
 
-    times    = times[sel]
-    E_B_all  = E_B_all[sel];  E_J_all  = E_J_all[sel]
-    sf_B_all = sf_B_all[sel]; sf_J_all = sf_J_all[sel]
-    print(f"Drawing {len(times)} of the cached snapshots: "
+    #! The REPORTED snapshot: latest cached one at or BELOW the upper bound.
+    #! Force-included so a stride cannot skip it -- it is the curve the quoted
+    #! slope and the guide lines refer to, and after np.unique it is last in sel.
+    in_window = np.nonzero(times <= hi)[0]
+    if in_window.size == 0:
+        raise SystemExit(f"No cached snapshot at or below PLOT_TRANGE[1]={PLOT_TRANGE[1]} "
+                         f"(cached range {t_full_min:.3g}..{t_full_max:.3g})")
+    i_report = int(in_window[-1])
+    sel = np.unique(np.concatenate((sel, [i_report])).astype(int))
+
+    #! drop the first cached snapshot from the DRAWN set (its slope is still reported)
+    sel = sel[sel != 0] if sel.size > 1 else sel
+
+    times     = times[sel]
+    E_B_all   = E_B_all[sel];   E_J_all   = E_J_all[sel]
+    sfx_B_all = sfx_B_all[sel]; sfx_J_all = sfx_J_all[sel]
+    sfy_B_all = sfy_B_all[sel]; sfy_J_all = sfy_J_all[sel]
+    print(f"Drawing {len(times)} snapshots (t={t_first:.3g} excluded from the plot): "
           f"t c/Lx = {np.round(times, 3).tolist()}", flush=True)
 
     if COLOR_ABSOLUTE_TIME and not COLORBAR_FILL_WINDOW:
@@ -160,9 +233,8 @@ def plot_all(times, k, lag_d, E_B_all, E_J_all, sf_B_all, sf_J_all):
         norm = Normalize(vmin=float(times.min()), vmax=float(times.max()))  #! fill the drawn window
     cmap = matplotlib.colormaps[CMAP]
     kpos = k > 0
-    ord_s = str(SF_ORDER)
 
-    #! ---- FIGURE 1: power spectra ----
+    #! ---- FIGURE 1: power spectra  (UNCHANGED) ----
     fig1, axs1 = plt.subplots(1, 2, figsize=(13, 5), constrained_layout=True)
     for i in range(len(times)):
         col = cmap(norm(times[i]))
@@ -197,31 +269,70 @@ def plot_all(times, k, lag_d, E_B_all, E_J_all, sf_B_all, sf_J_all):
     out1 = os.path.join(outdir, "Spectra_dB_J.png")
     fig1.savefig(out1, dpi=150, bbox_inches="tight"); plt.close(fig1)
 
-    #! ---- FIGURE 2: 4th-order structure functions ----
-    fig2, axs2 = plt.subplots(1, 2, figsize=(13, 5), constrained_layout=True)
-    for i in range(len(times)):
-        col = cmap(norm(times[i]))
-        axs2[0].plot(lag_d, sf_B_all[i], color=col, lw=1.1, alpha=0.85)
-        axs2[1].plot(lag_d, sf_J_all[i], color=col, lw=1.1, alpha=0.85)
+    #! ---- FIGURE 2: sqrt of 2nd-order structure functions, x and y ----
+    #! Layout: rows = field (dB, J), columns = separation direction (x, y).
+    #! Plotted quantity is sqrt(SF_2), matching Hu+2026, so the guide slopes
+    #! 1/3 and 2/3 are directly comparable to their Figs. 2-4.
+    n_rows = 2 if SF_PLOT_J else 1
+    fig2, axs2 = plt.subplots(n_rows, 2, figsize=(13, 5 * n_rows),
+                              constrained_layout=True, squeeze=False)
 
-    sf_ylab = r"$S_{" + ord_s + r"}(\ell)=\langle|\Delta \mathrm{field}|^{" + ord_s + r"}\rangle$"
-    sf_ylims = [SFB_YLIM, SFJ_YLIM]
+    #! tuple: (axis, lags, drawn SF array, FIRST-snapshot SF, field label, direction, ylim)
+    panels = [
+        (axs2[0, 0], lag_x, sfx_B_all, sfx_B_first, r"$\delta B$", r"$\Delta x$  (outflow)", SFB_YLIM),
+        (axs2[0, 1], lag_y, sfy_B_all, sfy_B_first, r"$\delta B$", r"$\Delta y$  (inflow)",  SFB_YLIM)]
+    if SF_PLOT_J:
+        panels += [
+            (axs2[1, 0], lag_x, sfx_J_all, sfx_J_first, r"$J$", r"$\Delta x$  (outflow)", SFJ_YLIM),
+            (axs2[1, 1], lag_y, sfy_J_all, sfy_J_first, r"$J$", r"$\Delta y$  (inflow)",  SFJ_YLIM)]
 
-    for j, (ax, ttl) in enumerate(((axs2[0], r"$\delta B$"), (axs2[1], r"$J$"))):
+    fit_lo, fit_hi = SF_FIT_RANGE
+    print(f"\nsqrt(SF_2) log-log slopes, fitted over lag in [{fit_lo:g}, {fit_hi:g}] d0.", flush=True)
+    print(f"   first cached t={t_first:.3g} (printed only, not drawn) | "
+          f"reported t={times[-1]:.3g} (<= PLOT_TRANGE[1]={PLOT_TRANGE[1]})", flush=True)
+
+    for ax, lag, sf_all, sf_first, fld, dirn, ylim in panels:
+        root = np.sqrt(np.asarray(sf_all))            #! sqrt(SF_2): the plotted quantity
+
+        for i in range(len(times)):
+            ax.plot(lag, root[i], color=cmap(norm(times[i])), lw=1.1, alpha=0.85)
+
         ax.set_xscale("log"); ax.set_yscale("log")
         ax.set_xlabel(r"lag $\ell\ [d_0]$", fontsize=13)
-        ax.set_ylabel(sf_ylab, fontsize=13)
-        ax.set_title(ttl + fr"  (order {SF_ORDER} SF, along $x$)", fontsize=14)
+        ax.set_ylabel(r"$\sqrt{\mathrm{SF}_2(\ell)}$", fontsize=13)
+        ax.set_title(f"{fld}  along {dirn}", fontsize=14)
         ax.set_xlim(SF_XLIM[0], SF_XLIM[1])
-        ax.set_ylim(sf_ylims[j][0], sf_ylims[j][1])
+        ax.set_ylim(ylim[0], ylim[1])
+
+        #! reference power laws, anchored to the REPORTED curve inside the fit window
+        ref = root[-1]
+        m   = np.isfinite(ref) & (ref > 0) & (lag >= fit_lo) & (lag <= fit_hi)
+        if m.any():
+            a = int(np.argmax(m))                     #! first in-window point
+            for sl, ls, lab in SF_GUIDES:
+                g = lag ** sl * (ref[a] / lag[a] ** sl)
+                ax.plot(lag, g, color="k", ls=ls, lw=1.0, label=lab)
+
+        #! slopes: the first cached snapshot goes to stdout only; the reported one
+        #! (last drawn, i.e. latest at or below PLOT_TRANGE[1]) is also annotated.
+        s_first  = fit_loglog_slope(lag, np.sqrt(np.asarray(sf_first)), fit_lo, fit_hi)
+        s_report = fit_loglog_slope(lag, ref, fit_lo, fit_hi)
+        dir_tag  = "x" if lag is lag_x else "y"
+        print(f"   {fld:>10s}  along {dir_tag:<3s} : "
+              f"t={t_first:.3g} -> {s_first:.3f}    "
+              f"t={times[-1]:.3g} -> {s_report:.3f}", flush=True)
+
+        ax.text(0.03, 0.95, fr"slope $= {s_report:.2f}$  ($t={times[-1]:.2f}$)",
+                transform=ax.transAxes, fontsize=13, va="top", ha="left")
+
         add_scale_lines(ax, "lag")                    #! vertical markers at lag = each scale
         if ax.get_legend_handles_labels()[0]:
-            ax.legend(fontsize=9)
+            ax.legend(fontsize=9, loc="lower right")
 
     sm2 = cm.ScalarMappable(norm=norm, cmap=cmap); sm2.set_array([])
     cbar2 = fig2.colorbar(sm2, ax=axs2, fraction=0.046, pad=0.02)
     cbar2.set_label(r"$t\,c/L_x$", fontsize=13)
-    out2 = os.path.join(outdir, "sf4_dB_J.png")
+    out2 = os.path.join(outdir, "sf2_dB_J.png")
     fig2.savefig(out2, dpi=150, bbox_inches="tight"); plt.close(fig2)
 
     return out1, out2
@@ -235,8 +346,9 @@ if REPLOT_FROM_CACHE:
     if not os.path.exists(cache_path):
         raise SystemExit(f"REPLOT_FROM_CACHE=True but no cache at {cache_path}")
     d = np.load(cache_path, allow_pickle=True)
-    o1, o2 = plot_all(d["times"], d["k"], d["lag_d"],
-                      d["E_B"], d["E_J"], d["sf_B"], d["sf_J"])
+    o1, o2 = plot_all(d["times"], d["k"], d["lag_x"], d["lag_y"],
+                      d["E_B"], d["E_J"],
+                      d["sfx_B"], d["sfx_J"], d["sfy_B"], d["sfy_J"])
     print(f"Replotted from cache -> {o1}\n                        {o2}", flush=True)
     raise SystemExit(0)
 
@@ -261,8 +373,9 @@ def read_time(stream):
             pass
     return float("nan")
 
-def build_sf_lags(n):
-    hi = max(SF_MIN_LAG + 1, int(np.floor(SF_MAX_FRAC * n)))
+def build_sf_lags(n, max_frac):
+    """Geometrically-spaced integer lags in [SF_MIN_LAG, max_frac*n]."""
+    hi = max(SF_MIN_LAG + 1, int(np.floor(max_frac * n)))
     lags = np.unique(np.round(np.geomspace(SF_MIN_LAG, hi, num=SF_N_LAGS)).astype(int))
     return lags[(lags >= SF_MIN_LAG) & (lags <= hi)]
 
@@ -282,16 +395,43 @@ def x_spectrum(dfields, Nx, dx, half_factor):
     k = 2.0 * np.pi * np.fft.rfftfreq(Nx, d=dx)
     return k, P
 
-def x_sf_even(dfields, lags, order):
-    """SF_order = < |df|^order > along periodic x (roll), averaged over x and rows."""
-    half = order // 2
-    out  = np.full(lags.shape, np.nan, dtype=np.float64)
+def sf2_x(fields, lags):
+    """SF_2(dx) = < |f(x+dx) - f(x)|^2 > along PERIODIC x.
+
+    Vector increment: the three components are summed BEFORE averaging, i.e.
+    |Df|^2 = Df1^2 + Df2^2 + Df3^2, matching Hu+2026 Eq. 1. x is periodic in
+    these runs, so np.roll is a legitimate wrap; if you ever run open-x, this
+    must become a truncated increment like sf2_y below.
+    """
+    out = np.full(lags.shape, np.nan, dtype=np.float64)
     for li, l in enumerate(lags):
-        d2 = None
-        for g in dfields:
+        acc = None
+        for g in fields:
             d = (np.roll(g, -int(l), axis=1) - g).astype(np.float64)
-            d2 = d * d if d2 is None else d2 + d * d
-        out[li] = np.mean(d2 ** half)
+            acc = d * d if acc is None else acc + d * d
+        out[li] = np.mean(acc)                        #! average over x and over rows
+    return out
+
+def sf2_y(fields, lags):
+    """SF_2(dy) = < |f(y+dy) - f(y)|^2 > along NON-PERIODIC y.
+
+    y is reflecting and carries the Harris equilibrium, so NO wrap: the
+    increment is truncated to pairs that both lie inside the slab. That means
+    the number of contributing pairs shrinks as the lag grows -- large-lag
+    points are noisier, and lags beyond SF_Y_MAX_FRAC of the slab are not
+    computed at all.
+    """
+    ny  = fields[0].shape[0]
+    out = np.full(lags.shape, np.nan, dtype=np.float64)
+    for li, l in enumerate(lags):
+        l = int(l)
+        if l >= ny:                                   #! lag exceeds the slab: leave as NaN
+            continue
+        acc = None
+        for g in fields:
+            d = (g[l:, :] - g[:-l, :]).astype(np.float64)
+            acc = d * d if acc is None else acc + d * d
+        out[li] = np.mean(acc)
     return out
 
 def fluctuation(field2d):
@@ -316,6 +456,7 @@ def process_file(fname):
         Lx = float(x.max() - x.min())
         Ly = float(y.max() - y.min())
         dx = Lx / Nx
+        dy = Ly / Ny                                  #! cell size along y (uniform Minkowski)
         cs_y = 0.5 * (y.min() + y.max())
 
         half = 0.5 * CS_SLAB_FRAC * Ly
@@ -330,25 +471,50 @@ def process_file(fname):
     dB = [fluctuation(b) for b in Braw]
     dJ = [fluctuation(j) for j in Jraw]
 
+    #! ---- power spectra (unchanged) ----
     k, E_B = x_spectrum(dB, Nx, dx, half_factor=0.5)
     _, E_J = x_spectrum(dJ, Nx, dx, half_factor=1.0)
 
-    lags   = build_sf_lags(Nx)
-    sf_B   = x_sf_even(dB, lags, SF_ORDER)
-    sf_J   = x_sf_even(dJ, lags, SF_ORDER)
-    lag_d  = lags * dx
+    #! ---- structure functions ----
+    #! Along x the detrended and raw fields give IDENTICAL results (a per-row
+    #! constant cancels in the increment), so dB/dJ are used for both cases.
+    #! Along y the choice matters -- see SF_DETREND_Y.
+    By = dB if SF_DETREND_Y else Braw
+    Jy = dJ if SF_DETREND_Y else Jraw
+
+    lags_x = build_sf_lags(Nx,      SF_MAX_FRAC)
+    lags_y = build_sf_lags(ny_slab, SF_Y_MAX_FRAC)
+
+    sfx_B = sf2_x(dB, lags_x);  sfx_J = sf2_x(dJ, lags_x)
+    sfy_B = sf2_y(By, lags_y);  sfy_J = sf2_y(Jy, lags_y)
+
+    lag_x = lags_x * dx
+    lag_y = lags_y * dy                               #! y-lags use dy, NOT dx
 
     t_lc = t_code / Lx if (np.isfinite(t_code) and Lx > 0) else float("nan")
-    return dict(t_lc=t_lc, k=k, E_B=E_B, E_J=E_J, lag_d=lag_d, sf_B=sf_B, sf_J=sf_J)
+    return dict(t_lc=t_lc, k=k, E_B=E_B, E_J=E_J,
+                lag_x=lag_x, lag_y=lag_y,
+                sfx_B=sfx_B, sfx_J=sfx_J, sfy_B=sfy_B, sfy_J=sfy_J)
 
 #! ============================================================
 #! Gather files, distribute across ranks
 #! ============================================================
-files = sorted(glob.glob(f"{base}/fields.*.bp"), key=step_from_fname)[::FILE_STRIDE]
-if not files:
+all_files = sorted(glob.glob(f"{base}/fields.*.bp"), key=step_from_fname)
+if not all_files:
     raise SystemExit(f"No fields.*.bp in {base}")
+
+#! HARDCODED: the stride starts at index 0 so the FIRST file is always in; the LAST
+#! file is appended when the stride would otherwise skip it. Both endpoints are
+#! therefore always computed and cached, whatever FILE_STRIDE is set to. Whether
+#! the last one is DRAWN or REPORTED is then decided by PLOT_TRANGE.
+files = all_files[::FILE_STRIDE]
+if files[-1] != all_files[-1]:
+    files.append(all_files[-1])
+
 if rank == 0:
-    print(f"Found {len(files)} snapshots (stride {FILE_STRIDE}); slab = {CS_SLAB_FRAC:.2f} Ly around sheet", flush=True)
+    print(f"Found {len(all_files)} snapshots; processing {len(files)} "
+          f"(stride {FILE_STRIDE}, first and last forced); "
+          f"slab = {CS_SLAB_FRAC:.2f} Ly around sheet", flush=True)
     if HAVE_MPI and size > len(files):
         print(f"NOTE: {size} tasks for {len(files)} files -> {size-len(files)} idle; use -n {len(files)}", flush=True)
 
@@ -375,26 +541,33 @@ results = [r for chunk in gathered for r in chunk]
 results = [r for r in results if np.isfinite(r["t_lc"])]
 if not results:
     raise SystemExit("No usable snapshots (times missing?).")
-results.sort(key=lambda r: r["t_lc"])
+results.sort(key=lambda r: r["t_lc"])       #! index 0 = earliest; the plot logic relies on this
 
-k        = results[0]["k"]
-lag_d    = results[0]["lag_d"]
-times    = np.array([r["t_lc"] for r in results])
-E_B_all  = np.array([r["E_B"]  for r in results])
-E_J_all  = np.array([r["E_J"]  for r in results])
-sf_B_all = np.array([r["sf_B"] for r in results])
-sf_J_all = np.array([r["sf_J"] for r in results])
+k         = results[0]["k"]
+lag_x     = results[0]["lag_x"]
+lag_y     = results[0]["lag_y"]
+times     = np.array([r["t_lc"]  for r in results])
+E_B_all   = np.array([r["E_B"]   for r in results])
+E_J_all   = np.array([r["E_J"]   for r in results])
+sfx_B_all = np.array([r["sfx_B"] for r in results])
+sfx_J_all = np.array([r["sfx_J"] for r in results])
+sfy_B_all = np.array([r["sfy_B"] for r in results])
+sfy_J_all = np.array([r["sfy_J"] for r in results])
 
 #! ---- SAVE CACHE FIRST: compute is now safe even if plotting fails ----
 np.savez_compressed(cache_path,
-                    times=times, k=k, lag_d=lag_d,
-                    E_B=E_B_all, E_J=E_J_all, sf_B=sf_B_all, sf_J=sf_J_all,
-                    sf_order=SF_ORDER, cs_slab_frac=CS_SLAB_FRAC)
+                    times=times, k=k, lag_x=lag_x, lag_y=lag_y,
+                    E_B=E_B_all, E_J=E_J_all,
+                    sfx_B=sfx_B_all, sfx_J=sfx_J_all,
+                    sfy_B=sfy_B_all, sfy_J=sfy_J_all,
+                    sf_order=SF_ORDER, cs_slab_frac=CS_SLAB_FRAC,
+                    sf_detrend_y=SF_DETREND_Y)
 print(f"Wrote cache: {cache_path}", flush=True)
 
 #! ---- plot (wrapped: a rendering error leaves the cache intact) ----
 try:
-    out1, out2 = plot_all(times, k, lag_d, E_B_all, E_J_all, sf_B_all, sf_J_all)
+    out1, out2 = plot_all(times, k, lag_x, lag_y, E_B_all, E_J_all,
+                          sfx_B_all, sfx_J_all, sfy_B_all, sfy_J_all)
     print(f"Saved {out1}\nSaved {out2}", flush=True)
 except Exception as exc:
     print(f"PLOTTING FAILED ({type(exc).__name__}: {exc}); cache is safe. "
@@ -403,4 +576,5 @@ except Exception as exc:
 
 print(f"  snapshots: {len(results)}   t c/Lx in [{times.min():.3g}, {times.max():.3g}]", flush=True)
 print(f"  spectrum: periodic x, {CS_SLAB_FRAC:.2f}Ly slab; df=f-<f>_x(y)", flush=True)
-print(f"  SF: order {SF_ORDER}, vector increment magnitude along x", flush=True)
+print(f"  SF: order 2 (sqrt plotted), vector increment, along x (periodic roll) "
+      f"and y (truncated, detrend={SF_DETREND_Y})", flush=True)

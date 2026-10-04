@@ -1,39 +1,49 @@
 """
-Created on Sat Apr 18 2026
+Created on Sat Sep 28 2026
 
 @author: Pranab JD, Claude AI
 
 Plot B_x, J_z and rho from the relativistic single-Harris-sheet Entity run.
+Geometry (reversal across Y): outflow = X, inflow = Y, guide = Z.
 
 Layout
 ------
-    2D  (one plane, XY or YZ)          : 1 x 3   (B_x, J_z, rho)
-    3D  (two orthogonal planes)        : 2 x 3
-        row 1: XY plane (mid-Z);  row 2: YZ plane (mid-X)
-
-Geometry (single Harris, reversal across Y): outflow = X, inflow = Y, guide = Z.
-
-Usage
------
-    srun -n 8 python3 Plot_Bx_Jz_rho.py "$input" "$output" --Lx 500
-    srun -n 8 python3 Plot_Bx_Jz_rho.py "$input" "$output" --Lx 750 --plane2d yz
-
-    --Lx : box length (code units). Assumes Lx = Ly (2D) and Lx = Ly = Lz (3D).
-           Every axis gets N_TICKS equidistant ticks: linspace(0, Lx, N_TICKS).
+    2D (one plane, XY or YZ)    : 1 x 3   B_x, J_z, rho
+    3D (two orthogonal planes)  : 2 x 3   row 1 = XY at mid-Z, row 2 = ZY at mid-X
 
 Array axis order (Entity)
 -------------------------
-    2D field arrays : (Ny, Nx)            [axis0=y, axis1=x]
-    3D field arrays : (Nz, Ny, Nx)        [axis0=z, axis1=y, axis2=x]
-      3D XY (mid-Z) : start=[k,0,0], count=[1,Ny,Nx]  -> (Ny, Nx)
-      3D YZ (mid-X) : start=[0,0,i], count=[Nz,Ny,1]  -> (Nz,Ny) -> .T -> (Ny,Nz)
+    2D field arrays : (Ny, Nx)       [axis0 = x2, axis1 = x1]
+    3D field arrays : (Nz, Ny, Nx)   [axis0 = x3, axis1 = x2, axis2 = x1]
+
+Time is always normalised by the light-crossing time of the outflow direction, t c / L_x.
+
+Usage
+-----
+    sfolder="/scratch/project_465003132/RMR_pair_3D/sigma_10_Z100/"
+    folder="/scratch/project_465003132/RMR_pair_3D/sigma_10_Z100/RMR/"
+    fields="${folder}/fields"
+    output="${folder}/plots"
+
+    Lx=200.0; Ly=100.0; Lz=100.0
+
+    srun python3 -u ../postprocessing/Plot_B_J_rho.py "$fields" "$output" \
+        --Lx "$Lx" --Ly "$Ly" --Lz "$Lz"        # 3D runs
+
+    srun python3 -u ../postprocessing/Plot_B_J_rho.py "$fields" "$output" \
+        --Lx "$Lx" --Ly "$Ly"                   # 2D runs in the XY plane
+
+    srun python3 -u ../postprocessing/Plot_B_J_rho.py "$fields" "$output" \
+        --Ly "$Ly" --Lz "$Lz" --plane2d yz      # 2D runs in the YZ plane
 """
 
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")
+
 from mpi4py import MPI
 from adios2 import Stream
+
 import argparse, os, glob
 import matplotlib.pyplot as plt
 
@@ -41,19 +51,23 @@ import matplotlib.pyplot as plt
 #! USER SETTINGS
 #! ============================================================
 TIME_KEY = "Time"        #! adjust if Entity stores time under another key
+F_BX     = "fB1"         #! in-plane reversing field
+F_JZ     = "fJ3"         #! out-of-plane current
+F_N      = "fN"          #! number density
 
-#! Colorbar limits. None -> automatic percentile. Set a number to fix the range.
-BX_VMAX  = 3.0
-JZ_VMAX  = 1.5
+#! Plot aspect: "equal" preserves the physical X/Y scale; "auto" fills the subplot
+PLOT_ASPECT = "equal"    #! "equal" or "auto"
+
+#! Colourbar limits. None -> percentile from the data.
+BX_VMAX  = 2.0
+JZ_VMAX  = 2.0
 RHO_VMIN = 0.0
-RHO_VMAX = 3.0
+RHO_VMAX = 8.0
+PCT      = 99.0               #! percentile used wherever a limit above is None
 
-#! Percentiles used when the corresponding limit above is None.
-BX_PCT  = 99.0
-JZ_PCT  = 99.0
-RHO_PCT = 99.0
-
-N_TICKS = 5             #! equidistant ticks per axis (incl. 0 and Lx)
+#! One panel's plot area in inches. PAD_W must cover the ylabel, the colourbar and its tick labels;
+#! PAD_H covers the title and the xlabel.
+PANEL, PAD_W, PAD_H = 4.6, 1.8, 1.2
 
 #! ============================================================
 #! MPI setup
@@ -66,39 +80,37 @@ size = comm.Get_size()
 #! Args
 #! ============================================================
 parser = argparse.ArgumentParser()
-parser.add_argument("base",   type=str, help="Directory with fields.NNNNNNNNN.bp files")
-parser.add_argument("outdir", type=str, help="Output directory for PNG plots")
+parser.add_argument("base",      type=str)
+parser.add_argument("outdir",    type=str)
 parser.add_argument("--plane2d", type=str, default="xy", choices=["xy", "yz"],
-                    help="For 2D runs: which plane the run is in (default: xy)")
-parser.add_argument("--Lx", type=float, required=True,
-                    help="Box length in code units; assumes Lx = Ly (2D), Lx = Ly = Lz (3D)")
-args     = parser.parse_args()
-base     = args.base
-outdir   = args.outdir
-plane2d  = args.plane2d.lower()
-Lx_cli   = args.Lx
+                    help="2D runs only: which physical plane the run is in. Labels only; "
+                         "the array is always (x2, x1). Default: xy")
 
-if Lx_cli <= 0.0:
-    parser.error("--Lx must be positive")
+#! Optional span overrides. None -> take the span from the file's coordinate arrays.
+parser.add_argument("--Lx", type=float, default=None)
+parser.add_argument("--Ly", type=float, default=None)
+parser.add_argument("--Lz", type=float, default=None)
+args = parser.parse_args()
 
-#! N_TICKS equidistant values 0..Lx; same array on every axis (Lx = Ly = Lz).
-TICKS = np.linspace(0.0, Lx_cli, N_TICKS)
+BASE, OUTDIR, PLANE2D = args.base, args.outdir, args.plane2d.lower()
+L_OVER = {"x1": args.Lx, "x2": args.Ly, "x3": args.Lz}      #! None = use the file
+L_FLAG = {"x1": "--Lx", "x2": "--Ly", "x3": "--Lz"}         #! for the mismatch message
+
+if PLOT_ASPECT not in ("equal", "auto"):
+    parser.error('PLOT_ASPECT must be either "equal" or "auto"')
+
+for k, v in L_OVER.items():
+    if v is not None and v <= 0.0:
+        parser.error(f"{L_FLAG[k]} override must be positive")
 
 if rank == 0:
-    os.makedirs(outdir, exist_ok=True)
+    os.makedirs(OUTDIR, exist_ok=True)
 comm.Barrier()
 
-#! ============================================================
-#! Find all files & distribute across ranks (round-robin)
-#! ============================================================
-files = sorted(glob.glob(f"{base}/fields.*.bp"))
-
+files = sorted(glob.glob(f"{BASE}/fields.*.bp"))
 if rank == 0:
-    print(f"\n\nFound {len(files)} files", flush=True)
-    print(f"    2D plane = {plane2d}", flush=True)
-    print(f"    Lx       = {Lx_cli}   ticks = {TICKS}", flush=True)
-    print(" ", flush=True)
-
+    print(f"\nFound {len(files)} files   (2D plane = {PLANE2D})", flush=True)
+    print(f"    L override = {{x1: {args.Lx}, x2: {args.Ly}, x3: {args.Lz}}}   (None -> read from the file)\n", flush=True)
 files_local = files[rank::size]
 
 #! ============================================================
@@ -112,163 +124,159 @@ def step_from_fname(fname):
         return -1
 
 def read_time(stream):
-    try:
-        val = stream.read(TIME_KEY)
-        if val is not None:
-            return float(val)
-    except Exception:
-        pass
-    try:
-        return float(stream.read_attribute(TIME_KEY))
-    except Exception:
-        pass
+    for getter in (lambda: stream.read(TIME_KEY), lambda: stream.read_attribute(TIME_KEY)):
+        try:
+            v = getter()
+            if v is not None:
+                return float(np.asarray(v).ravel()[0])
+        except Exception:
+            pass
     return float("nan")
 
-#! ---- hyperslab slice readers (3D): read ONE plane, not the whole cube ----
+_warned = set()
+
+def warn_once(key, msg):
+    """One line per distinct issue, from rank 0 only, to keep the logs readable."""
+    if rank == 0 and key not in _warned:
+        _warned.add(key)
+        print(f"WARNING: {msg}", flush=True)
+
+def axis_span(coord, name):
+    """
+    Span of one axis from its cell CENTRES: X1/X2/X3 have the same length as the field axis, so the
+    domain runs from c[0] - dx/2 to c[-1] + dx/2. The plotted axis is pinned to [0, L]. Entity writes
+    ascending, uniformly spaced coordinates; both are flagged if they do not hold, since a descending
+    axis would give a negative span and an inverted extent. A --Lx/--Ly/--Lz override wins over the
+    file, and is flagged if the two disagree by more than 1%.
+    """
+    c = np.asarray(coord, dtype=float).ravel()
+    if c.size < 2:
+        return 1.0
+    d  = np.diff(c)
+    dc = float(np.median(d))
+    if dc <= 0.0:
+        warn_once(f"desc_{name}", f"{name} is not increasing; the extent will be inverted")
+    if np.max(np.abs(d - dc)) > 1.0e-6 * abs(dc):
+        warn_once(f"nonuni_{name}", f"{name} spacing is non-uniform; the span uses the median dx")
+    span  = float((c[-1] + 0.5 * dc) - (c[0] - 0.5 * dc))
+    L_cli = L_OVER.get(name)
+    if L_cli is None:
+        return span
+    if span > 0.0 and abs(span - L_cli) / span > 0.01:
+        warn_once(f"mismatch_{name}",
+                  f"{L_FLAG[name]} = {L_cli:g} disagrees with the {name} span {span:g} from the file "
+                  f"by more than 1%; using the override")
+    return float(L_cli)
+
 def slab_xy(stream, name, k, Ny, Nx):
-    #! mid-Z plane -> (Ny, Nx); reads 1*Ny*Nx elements, not Nz*Ny*Nx
+    """Mid-Z plane of a 3D array -> (Ny, Nx). Reads 1*Ny*Nx elements, not Nz*Ny*Nx."""
     a = np.asarray(stream.read(name, start=[int(k), 0, 0], count=[1, int(Ny), int(Nx)]))
     return a.reshape(int(Ny), int(Nx))
 
-def slab_yz(stream, name, i, Nz, Ny):
-    #! mid-X plane -> (Ny, Nz); reads Nz*Ny*1 elements, then transpose
+def slab_zy(stream, name, i, Nz, Ny):
+    """Mid-X plane of a 3D array -> (Ny, Nz): rows = Y (vertical), columns = Z (horizontal)."""
     a = np.asarray(stream.read(name, start=[0, 0, int(i)], count=[int(Nz), int(Ny), 1]))
     return a.reshape(int(Nz), int(Ny)).T
 
-def sym_limits(data, fixed_vmax, pct):
-    if fixed_vmax is not None:
-        return -abs(fixed_vmax), abs(fixed_vmax)
-    vmax = np.percentile(np.abs(data), pct)
-    if vmax == 0.0:
-        vmax = 1.0e-30
-    return -vmax, vmax
+def sym_limits(data, fixed):
+    """Symmetric limits about zero, for the signed quantities."""
+    v = abs(fixed) if fixed is not None else max(np.percentile(np.abs(data), PCT), 1.0e-30)
+    return -v, v
 
-def rho_limits(data, fixed_vmin, fixed_vmax, pct):
-    vmin = fixed_vmin if fixed_vmin is not None else np.percentile(data, 100.0 - pct)
-    vmax = fixed_vmax if fixed_vmax is not None else np.percentile(data, pct)
-    if vmax <= vmin:
-        vmax = vmin + 1.0e-30
-    return vmin, vmax
+def rho_limits(data):
+    vmin = RHO_VMIN if RHO_VMIN is not None else np.percentile(data, 100.0 - PCT)
+    vmax = RHO_VMAX if RHO_VMAX is not None else np.percentile(data, PCT)
+    return vmin, max(vmax, vmin + 1.0e-30)
 
-def draw(ax, data, title, xlabel, ylabel, extent, cmap, vmin, vmax, fig):
-    im = ax.imshow(data, origin="lower", aspect="equal", extent=extent, cmap=cmap, vmin=vmin, vmax=vmax)
+def draw(fig, ax, data, title, xlabel, ylabel, extent, cmap, vmin, vmax):
+    im = ax.imshow(data, origin="lower", aspect=PLOT_ASPECT, extent=extent, cmap=cmap, vmin=vmin, vmax=vmax)
     ax.set_title(title, fontsize=14)
     ax.set_xlabel(xlabel, fontsize=12)
     ax.set_ylabel(ylabel, fontsize=12)
-    ax.set_xticks(TICKS)                          #! N_TICKS equidistant, code units
-    ax.set_yticks(TICKS)
     ax.tick_params(axis="both", labelsize=10)
-    cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-    cbar.ax.tick_params(labelsize=12)
+    #! the colourbar is attached to the axes, never an inset: constrained_layout then reserves room for
+    #! it AND for the next panel's tick labels, so nothing can overlap whatever the panel aspect is
+    cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.03)
+    cbar.ax.tick_params(labelsize=11)
 
-lbl_x = r"$x\ \omega_p/c$"
-lbl_y = r"$y\ \omega_p/c$"
-lbl_z = r"$z\ \omega_p/c$"
+def figure_size(row_aspects):
+    """
+    Figure size in inches for a 3-column grid, one entry per row giving that row's physical Ly/Lx.
+    With PLOT_ASPECT = "equal" a wide box is short, so each row's height follows its own data aspect
+    (clamped so a very flat or very tall box stays legible). With "auto" every panel is PANEL tall.
+    """
+    width = 3 * (PANEL + PAD_W)
+    if PLOT_ASPECT == "equal":
+        height = sum(min(max(PANEL * a, 1.5), 2.0 * PANEL) + PAD_H for a in row_aspects)
+    else:
+        height = len(row_aspects) * (PANEL + PAD_H)
+    return width, height
+
+LBL_X, LBL_Y, LBL_Z = r"$x\ \omega_p/c$", r"$y\ \omega_p/c$", r"$z\ \omega_p/c$"
 
 #! ============================================================
-#! Loop over assigned files
+#! Loop over the files assigned to this rank
 #! ============================================================
 for fname in files_local:
-
     step_idx = step_from_fname(fname)
 
     with Stream(fname, "r") as s:
         next(s.steps())
-
-        #! coordinate arrays are 1D and tiny -> full read is fine, gives the dims
+        #! coordinate arrays are 1D and tiny, so a full read is fine and gives the dimensions
         x = np.asarray(s.read("X1")); Nx = x.size
         y = np.asarray(s.read("X2")); Ny = y.size
         try:
             z = np.asarray(s.read("X3")); Nz = z.size
         except Exception:
-            z = None; Nz = 1
-
-        t_code = read_time(s)
+            z, Nz = None, 1
         is3d   = (z is not None and Nz > 1)
+        t_code = read_time(s)
 
         if is3d:
-            #! HYPERSLAB: read only the two plotted planes (mid-Z, mid-X)
-            k = Nz // 2
-            i = Nx // 2
-            Bx_xy  = slab_xy(s, "fB1", k, Ny, Nx)
-            Jz_xy  = slab_xy(s, "fJ3", k, Ny, Nx)
-            rho_xy = slab_xy(s, "fN",  k, Ny, Nx)
-            Bx_yz  = slab_yz(s, "fB1", i, Nz, Ny)
-            Jz_yz  = slab_yz(s, "fJ3", i, Nz, Ny)
-            rho_yz = slab_yz(s, "fN",  i, Nz, Ny)
+            k, i = Nz // 2, Nx // 2      #! the two plotted planes: mid-Z and mid-X
+            Bx_xy, Jz_xy, rho_xy = (slab_xy(s, n, k, Ny, Nx) for n in (F_BX, F_JZ, F_N))
+            Bx_zy, Jz_zy, rho_zy = (slab_zy(s, n, i, Nz, Ny) for n in (F_BX, F_JZ, F_N))
         else:
-            #! 2D planes are small -> full read
-            Bx  = np.asarray(s.read("fB1"))
-            Jz  = np.asarray(s.read("fJ3"))
-            rho = np.asarray(s.read("fN"))
+            Bx, Jz, rho = (np.asarray(s.read(n)) for n in (F_BX, F_JZ, F_N))
 
-    #! ========================================================
-    #! Time label: light-crossing times of Lx (t c/Lx = t_code/Lx, c=1)
-    #! ========================================================
-    Lx = float(x.max() - x.min())
-    if (not np.isnan(t_code)) and Lx > 0:
-        time_label = rf"$t\,c/L_x = {t_code / Lx:.2f}$"
-    else:
-        time_label = f"step {step_idx:09d}   (time or Lx not found)"
+    #! ---- per-axis spans; no assumption that Lx = Ly = Lz ----
+    Lx, Ly = axis_span(x, "x1"), axis_span(y, "x2")
+    Lz     = axis_span(z, "x3") if is3d else None
 
-    #! ========================================================
-    #! 2D : 1 x 3  (B_x, J_z, rho) in the chosen plane
-    #! ========================================================
+    #! ---- time in light-crossing times of the outflow direction ----
+    time_label = (rf"$t\,c/L_x = {t_code / Lx:.2f}$" if np.isfinite(t_code) and Lx > 0
+                  else f"step {step_idx:09d}")
+
     if not is3d:
-        if plane2d == "xy":
-            ext = [x.min(), x.max(), y.min(), y.max()]
-            hlabel, hx = lbl_x, "X"
-        else:  # yz
-            ext = [z.min(), z.max(), y.min(), y.max()]
-            hlabel, hx = lbl_z, "Z"
+        #! the array is (Nx2, Nx1): horizontal = x1, vertical = x2 = Y. plane2d only sets the label.
+        ext    = [0.0, Lx, 0.0, Ly]
+        hlabel = LBL_X if PLANE2D == "xy" else LBL_Z
+        hx     = "X"   if PLANE2D == "xy" else "Z"
 
-        fig, axs = plt.subplots(1, 3, figsize=(4.6 * 3, 4.7), constrained_layout=True)
+        fig, axs = plt.subplots(1, 3, figsize=figure_size([Ly / Lx]), constrained_layout=True)
+        draw(fig, axs[0], Bx,  rf"$B_x\ ({hx}, Y)$",  hlabel, LBL_Y, ext, "seismic", *sym_limits(Bx, BX_VMAX))
+        draw(fig, axs[1], Jz,  rf"$J_z\ ({hx}, Y)$",  hlabel, LBL_Y, ext, "seismic", *sym_limits(Jz, JZ_VMAX))
+        draw(fig, axs[2], rho, rf"$\rho\ ({hx}, Y)$", hlabel, LBL_Y, ext, "inferno", *rho_limits(rho))
 
-        vmin, vmax = sym_limits(Bx, BX_VMAX, BX_PCT)
-        draw(axs[0], Bx, rf"$B_x\ ({hx}, Y)$", hlabel, lbl_y, ext, "seismic", vmin, vmax, fig)
-
-        vmin, vmax = sym_limits(Jz, JZ_VMAX, JZ_PCT)
-        draw(axs[1], Jz, rf"$J_z\ ({hx}, Y)$", hlabel, lbl_y, ext, "seismic", vmin, vmax, fig)
-
-        vmin, vmax = rho_limits(rho, RHO_VMIN, RHO_VMAX, RHO_PCT)
-        draw(axs[2], rho, rf"$\rho\ ({hx}, Y)$", hlabel, lbl_y, ext, "inferno", vmin, vmax, fig)
-
-    #! ========================================================
-    #! 3D : 2 x 3.  Row1 = XY (mid-Z); Row2 = YZ (mid-X). Slabs already read.
-    #! ========================================================
     else:
-        ext_xy = [x.min(), x.max(), y.min(), y.max()]
-        ext_yz = [z.min(), z.max(), y.min(), y.max()]
+        #! row 1 = XY at mid-Z (horizontal span Lx), row 2 = ZY at mid-X (horizontal span Lz);
+        #! both rows share the vertical Y axis
+        ext_xy, ext_zy = [0.0, Lx, 0.0, Ly], [0.0, Lz, 0.0, Ly]
 
-        fig, axs = plt.subplots(2, 3, figsize=(4.6 * 3, 5.2 * 2), constrained_layout=True)
-
-        #! ---- row 1: XY ----
-        vmin, vmax = sym_limits(Bx_xy, BX_VMAX, BX_PCT)
-        draw(axs[0, 0], Bx_xy, r"$B_x\ (X, Y)$", lbl_x, lbl_y, ext_xy, "seismic", vmin, vmax, fig)
-        vmin, vmax = sym_limits(Jz_xy, JZ_VMAX, JZ_PCT)
-        draw(axs[0, 1], Jz_xy, r"$J_z\ (X, Y)$", lbl_x, lbl_y, ext_xy, "seismic", vmin, vmax, fig)
-        vmin, vmax = rho_limits(rho_xy, RHO_VMIN, RHO_VMAX, RHO_PCT)
-        draw(axs[0, 2], rho_xy, r"$\rho\ (X, Y)$", lbl_x, lbl_y, ext_xy, "inferno", vmin, vmax, fig)
-
-        #! ---- row 2: YZ ----
-        vmin, vmax = sym_limits(Bx_yz, BX_VMAX, BX_PCT)
-        draw(axs[1, 0], Bx_yz, r"$B_x\ (Y, Z)$", lbl_z, lbl_y, ext_yz, "seismic", vmin, vmax, fig)
-        vmin, vmax = sym_limits(Jz_yz, JZ_VMAX, JZ_PCT)
-        draw(axs[1, 1], Jz_yz, r"$J_z\ (Y, Z)$", lbl_z, lbl_y, ext_yz, "seismic", vmin, vmax, fig)
-        vmin, vmax = rho_limits(rho_yz, RHO_VMIN, RHO_VMAX, RHO_PCT)
-        draw(axs[1, 2], rho_yz, r"$\rho\ (Y, Z)$", lbl_z, lbl_y, ext_yz, "inferno", vmin, vmax, fig)
+        fig, axs = plt.subplots(2, 3, figsize=figure_size([Ly / Lx, Ly / Lz]), constrained_layout=True)
+        draw(fig, axs[0, 0], Bx_xy,  r"$B_x\ (X, Y)$",  LBL_X, LBL_Y, ext_xy, "seismic", *sym_limits(Bx_xy, BX_VMAX))
+        draw(fig, axs[0, 1], Jz_xy,  r"$J_z\ (X, Y)$",  LBL_X, LBL_Y, ext_xy, "seismic", *sym_limits(Jz_xy, JZ_VMAX))
+        draw(fig, axs[0, 2], rho_xy, r"$\rho\ (X, Y)$", LBL_X, LBL_Y, ext_xy, "inferno", *rho_limits(rho_xy))
+        draw(fig, axs[1, 0], Bx_zy,  r"$B_x\ (Z, Y)$",  LBL_Z, LBL_Y, ext_zy, "seismic", *sym_limits(Bx_zy, BX_VMAX))
+        draw(fig, axs[1, 1], Jz_zy,  r"$J_z\ (Z, Y)$",  LBL_Z, LBL_Y, ext_zy, "seismic", *sym_limits(Jz_zy, JZ_VMAX))
+        draw(fig, axs[1, 2], rho_zy, r"$\rho\ (Z, Y)$", LBL_Z, LBL_Y, ext_zy, "inferno", *rho_limits(rho_zy))
 
     fig.suptitle(time_label, fontsize=18)
-
-    outfile = f"{outdir}/B_J_rho_{step_idx:09d}.png"
+    outfile = f"{OUTDIR}/B_J_rho_{step_idx:09d}.png"
     fig.savefig(outfile, dpi=150, bbox_inches="tight")
     plt.close(fig)
-
     print(f"Saved {outfile}", flush=True)
 
-#! ============================================================
-#! Sync
-#! ============================================================
 comm.Barrier()
 if rank == 0:
     print("\nDone.", flush=True)
