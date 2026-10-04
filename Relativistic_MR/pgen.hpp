@@ -254,34 +254,55 @@ namespace user
 
         InitFields<D> init_flds;
 
-        static auto make_init(PGen& g) -> InitFields<D> 
+        static auto make_init(PGen& g) -> InitFields<D>
         {
-            raise::ErrorIf(g.mass_ratio < (real_t)1.0, "ion/positron mass (species 2) must be >= electron mass (species 1); mass ratio=1 is pair plasma", HERE);
-
-            //* sigma_ion = (skindepth0/larmor0)^2 / mass_ratio
-            g.sigma_ion = (g.skindepth0 / g.larmor0 * g.skindepth0 / g.larmor0) / g.mass_ratio;
-            
-            //* B_BG = sqrt(sigma_ion)
-            g.B_BG = (real_t)std::sqrt((double)g.sigma_ion);
-
-            //* The injector splits number_density across BOTH species so the
-            //* PER-SPECIES peak sheet density is cs_density/2, not cs_density
+            raise::ErrorIf(g.mass_ratio < (real_t)1.0, "species 2 mass must be >= species 1 mass; mass ratio = 1 is pair plasma", HERE);
+        
+            //* sigma0 = (skindepth0/larmor0)^2 is the ELECTRON cold magnetisation at
+            //* n_hat = 1 and B_hat = 1; species 2 is reduced by the mass ratio.
+            const real_t sigma0 = SQR(g.skindepth0 / g.larmor0);
+            g.sigma_ion = sigma0 / g.mass_ratio;
+        
+            //! B_BG = 1, NOT sqrt(sigma). Fields are in units of B0 = 1/larmor0, and the
+            //! magnetisation is already fixed by [scales]: to change sigma, change
+            //! larmor0 = skindepth0/sqrt(sigma_target), not the field amplitude.
+            g.B_BG = ONE;
+        
+            //! The conversion between the written current and curl B (see header above).
+            //! If this is 1 the Harris sheet is initialised with 1/AMP_COEFF of the
+            //! current its own field requires, and the sheet pinches on startup.
+            const real_t AMP_COEFF = SQR(g.skindepth0) / g.larmor0;
+        
+            //* per-species peak sheet density: the injector splits number_density in two
             const real_t n_per = (real_t)0.5 * g.cs_density;
-
-            const real_t beta_d = g.B_BG / ((real_t)2.0 * n_per * g.cs_width);
-            const real_t gamma_d = ONE / (real_t)std::sqrt(1.0 - (double)(beta_d * beta_d));
-            g.drift_u = beta_d * gamma_d;
-
-            g.T_cs_i = (g.B_BG * g.B_BG) * gamma_d / ((real_t)4.0 * n_per);                 //* theta_i^CS
-            g.T_cs_e = g.T_cs_i * g.mass_ratio;                                             //* theta_e^CS = theta_i^CS * mass ratio
-
-            g.T_bg_i = g.params.template get<real_t>("setup.bg_theta_i", (real_t)0.01);     //* theta_i^BG
-            g.T_bg_e = g.T_bg_i * g.mass_ratio;                                             //* theta_e^BG = theta_i^BG * mass ratio
-
-            //? Initialise Trubulence
-            g.tscale = initial_turbulence(g.Lx, g.Ly, g.Lz, g.turb_plane, g.turb_amp * g.B_BG, 
-                                          g.kmin, g.kmax, g.turb_seed, g.spectral_index, g.modes_host);
-
+        
+            //* Ampere at the sheet centre:  J_peak = AMP_COEFF * B_BG / cs_width,
+            //* and the two counter-drifting species supply J_peak = 2 * n_per * beta_d.
+            const real_t beta_d = AMP_COEFF * g.B_BG / ((real_t)2.0 * n_per * g.cs_width);
+            raise::ErrorIf(beta_d >= (real_t)1.0,
+                        "drift velocity >= c: the requested cs_density/cs_width cannot "
+                        "carry the current this field needs. Raise cs_density, raise "
+                        "cs_width, or lower sigma.",
+                        HERE);
+            const real_t gamma_d = ONE / (real_t)std::sqrt(1.0 - (double)SQR(beta_d));
+            g.drift_u            = beta_d * gamma_d;
+        
+            //* Pressure balance, in units of n0 * m_e * c^2:
+            //*   magnetic   P_mag = sigma0 * B_BG^2 / 2
+            //*   CS thermal P_cs  = 2 * n_per * theta_e / gamma_d   (both species, kT equal)
+            //* ==> theta_e^CS = sigma0 * B_BG^2 * gamma_d / (4 * n_per)
+            //* The old form used B_BG^2 alone, which is short by sigma0 once B_BG = 1.
+            g.T_cs_e = sigma0 * SQR(g.B_BG) * gamma_d / ((real_t)4.0 * n_per);
+            g.T_cs_i = g.T_cs_e / g.mass_ratio;          //* theta is per species rest mass
+        
+            g.T_bg_i = g.params.template get<real_t>("setup.bg_theta_i", (real_t)0.01);
+            g.T_bg_e = g.T_bg_i * g.mass_ratio;
+        
+            //? Turbulence (unchanged; amplitude is still relative to the in-plane field)
+            g.tscale = initial_turbulence(g.Lx, g.Ly, g.Lz, g.turb_plane,
+                                        g.turb_amp * g.B_BG, g.kmin, g.kmax,
+                                        g.turb_seed, g.spectral_index, g.modes_host);
+        
             const std::size_t nm = g.modes_host.size();
             g.kx_d = array_t<real_t*> { "turb_kx", nm };
             g.ky_d = array_t<real_t*> { "turb_ky", nm };
@@ -293,7 +314,7 @@ namespace user
             auto h_kz = Kokkos::create_mirror_view(g.kz_d);
             auto h_ph = Kokkos::create_mirror_view(g.ph_d);
             auto h_am = Kokkos::create_mirror_view(g.am_d);
-            for (std::size_t m = 0; m < nm; ++m) 
+            for (std::size_t m = 0; m < nm; ++m)
             {
                 h_kx(m) = g.modes_host[m].kx; h_ky(m) = g.modes_host[m].ky;
                 h_kz(m) = g.modes_host[m].kz; h_ph(m) = g.modes_host[m].phase;
@@ -302,10 +323,10 @@ namespace user
             Kokkos::deep_copy(g.kx_d, h_kx); Kokkos::deep_copy(g.ky_d, h_ky);
             Kokkos::deep_copy(g.kz_d, h_kz); Kokkos::deep_copy(g.ph_d, h_ph);
             Kokkos::deep_copy(g.am_d, h_am);
-
+        
             return InitFields<D> { g.B_BG, g.B_BG * g.guide_field, g.cs_width, g.cs_y,
-                                    g.turb_plane, g.kx_d, g.ky_d, g.kz_d, g.ph_d, g.am_d,
-                                    nm, g.tscale[0], g.tscale[1], g.tscale[2] };
+                                g.turb_plane, g.kx_d, g.ky_d, g.kz_d, g.ph_d, g.am_d,
+                                nm, g.tscale[0], g.tscale[1], g.tscale[2] };
         }
 
         static auto mass_ratio_from_species(Metadomain<S, M>& m) -> real_t 
@@ -347,63 +368,86 @@ namespace user
 
 
         //? Startup diagnostics; all lengths in code units.
-        void print_setup() 
+        void print_setup()
         {
+            int mpi_rank = 0;
             #if defined(MPI_ENABLED)
-                int mpi_rank = 0;
                 MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank);
-                if (mpi_rank != 0) return;
             #endif
 
-            const bool is_pair = (mass_ratio == (real_t)1.0);
-            //* species-2 label and the "electron freq." vs "ion freq." wording
-            const std::string sp2      = is_pair ? "positron" : "ion";
-            const std::string title    = is_pair ? "Relativistic Harris sheet (pair plasma)"
-                                                 : "Relativistic Harris sheet (ion-electron plasma)";
+            const bool is_pair      = (mass_ratio == (real_t)1.0);
+            const std::string sp2   = is_pair ? "positron" : "ion";
+            const std::string title = is_pair ? "Relativistic Harris sheet (pair plasma)" : "Relativistic Harris sheet (ion-electron plasma)";
 
             const auto nx1 = metadomain.mesh().n_active(in::x1);
             const auto nx2 = metadomain.mesh().n_active(in::x2);
-            const real_t dx = Lx / (real_t)nx1;
+            const real_t dx  = Lx / (real_t)nx1;
 
-            //* mean Lorentz factor depends only on theta = kT/(m_s c^2), NOT on particle identity.
-            //* gamma correction (skin depth ~ sqrt<g>, Larmor ~ <g>) is thermal
-            auto gamma_mean = [](real_t theta) -> real_t 
+            //* ---- normalisation constants -------------------------------------
+            const real_t sigma0    = SQR(skindepth0 / larmor0);     //* [scales] magnetisation
+            const real_t AMP_COEFF = SQR(skindepth0) / larmor0;     //* J_written / curl B
+            const real_t n_bg_per  = (real_t)0.5;                   //* per species, n0 units
+            const real_t n_cs_per  = (real_t)0.5 * cs_density;      //* per species, peak
+
+            //* ---- thermal Lorentz factors (theta only, species-independent) ----
+            auto gamma_mean = [](real_t theta) -> real_t
             {
                 return ONE + theta * ((real_t)6.0 + (real_t)15.0 * theta) / ((real_t)4.0 + (real_t)5.0 * theta);
             };
-            const real_t gamma_e_mean = gamma_mean(T_bg_e);                                 //* electron <gamma> from theta_e
-            const real_t gamma_i_mean = gamma_mean(T_bg_i);                                 //* sp2 (positron/ion) <gamma> from theta_i
+            const real_t gamma_e_mean = gamma_mean(T_bg_e);
+            const real_t gamma_i_mean = gamma_mean(T_bg_i);
 
-            //* characteristic scales (code units = d0). Both species carry the relativistic
-            //* correction from their own <gamma>: skin depth ~ sqrt(<g>), Larmor ~ <g>.
-            const real_t d_e       = skindepth0 * (real_t)std::sqrt((double)gamma_e_mean);                  //* electron skin depth = sqrt(<g_e>) * d0
-            const real_t d_i       = skindepth0 * (real_t)std::sqrt((double)(mass_ratio * gamma_i_mean));   //* sp2 skin depth = sqrt(mr * <g_sp2>) * d0  (mass + thermal)
-            const real_t rho_e     = larmor0 * gamma_e_mean;                                                //* electron Larmor = <g_e> * rho_e,cold
-            const real_t rho_i     = larmor0 * mass_ratio * gamma_i_mean;                                   //* sp2 Larmor = mr * <g_sp2> * larmor0  (mass + thermal)
-            const real_t lambda_De = (real_t)std::sqrt((double)T_bg_e) * d_e;                               //* electron Debye = sqrt(theta_e) * d_e,cold (theta_e already hot)
-            const real_t lambda_Di = (real_t)std::sqrt((double)T_bg_i) * d_i;                               //* sp2 Debye = sqrt(theta_i) * d_i
-            const real_t beta_d    = drift_u / (real_t)std::sqrt(1.0 + (double)(drift_u * drift_u));        //* drift 3-velocity
-            const real_t gamma_d   = (real_t)std::sqrt(1.0 + (double)(drift_u * drift_u));                  //* drift Lorentz factor (= u/beta)
-            const real_t runtime   = params.template get<simtime_t>("simulation.runtime");
-            const real_t t_wpe     = runtime;                                                               //* 1/omega_pe (code unit as-is)
-            const real_t t_wpi     = runtime / (real_t)std::sqrt((double)mass_ratio);                       //* 1/omega_p(sp2)
-            const real_t t_Lx      = runtime / Lx;                                                          //* light-crossing times of Lx (c=1)
+            //* ---- drift ---------------------------------------------------------
+            const real_t beta_d  = drift_u / (real_t)std::sqrt(1.0 + (double)SQR(drift_u));
+            const real_t gamma_d = (real_t)std::sqrt(1.0 + (double)SQR(drift_u));
 
-            const real_t sigma_e_cold = sigma_ion * mass_ratio;                                             //* B^2/(4pi n m_e c^2)
-            const real_t sigma_e_hot  = sigma_e_cold / gamma_e_mean;                                        //* B^2/(4pi n <gamma_e> m_e c^2)
+            //* ---- characteristic scales ----------------------------------------
+            //* sqrt(2): n_e = n0/2 after the injector's species split
+            const real_t d_e_cold  = skindepth0 * (real_t)std::sqrt(2.0);
+            const real_t d_e       = d_e_cold * (real_t)std::sqrt((double)gamma_e_mean);
+            const real_t d_i       = skindepth0 * (real_t)std::sqrt(2.0 * (double)(mass_ratio * gamma_i_mean));
+            const real_t rho_e     = larmor0 * gamma_e_mean / B_BG;             //* Larmor ~ 1/B
+            const real_t rho_i     = larmor0 * mass_ratio * gamma_i_mean / B_BG;
+            const real_t lambda_De = (real_t)std::sqrt((double)T_bg_e) * d_e;
+            const real_t lambda_Di = (real_t)std::sqrt((double)T_bg_i) * d_i;
 
-            //* PRESSURE BALANCE across the sheet (Harris equilibrium), code units, n_bg=1.
-            //*   upstream magnetic  P_mag = B_BG^2 / 2
-            //*   upstream thermal   P_th  = 2 * n_bg * theta_b        (2 species)
-            //*   CS thermal (peak)  P_cs  = 2 * n_CS * theta_d / gamma_d   (co-moving, both species)
-            const real_t P_mag = B_BG * B_BG / (real_t)2.0;
-            const real_t P_th  = T_bg_i;                                                                    //* n_bg=1 per species (pair: both theta_b)
-            const real_t P_cs  = cs_density * T_cs_i / gamma_d;                                             //* n_CS=cs_density, both species
-            const real_t plasma_beta = P_th / P_mag;                                                        //* upstream thermal / magnetic pressure
+            //* ---- times ----------------------------------------------------------
+            //* code time is in units of skindepth0/c, so converting to electron plasma
+            //* times costs the same sqrt(2) as the skin depth
+            const real_t runtime = params.template get<simtime_t>("simulation.runtime");
+            const real_t t_wpe   = runtime * skindepth0 / d_e_cold;
+            const real_t t_wpi   = runtime * skindepth0 / (skindepth0 * (real_t)std::sqrt(2.0 * (double)mass_ratio));
+            const real_t t_Lx    = runtime / Lx;
 
-            constexpr int LW1 = 34; 
-            constexpr int LW2 = 30; 
-            auto kv1 = [&](const std::string& label) -> std::string { std::ostringstream t; t << "\t" << std::left << std::setw(LW1) << label << "= "; return t.str(); };
+            //* ---- magnetisation ---------------------------------------------------
+            //* cold: sigma_s = B^2 * sigma0 / (n_s * m_s), with n_s = 0.5 per species
+            const real_t sigma_e_cold   = (real_t)2.0 * SQR(B_BG) * sigma0;
+            const real_t sigma_sp2_cold = (real_t)2.0 * SQR(B_BG) * sigma0 / mass_ratio;
+            const real_t sigma_tot_cold = (real_t)2.0 * SQR(B_BG) * sigma0 / (ONE + mass_ratio);
+
+            //* hot: each species' inertia is boosted by its own <gamma>; the total weights them
+            const real_t sigma_e_hot   = sigma_e_cold / gamma_e_mean;
+            const real_t sigma_sp2_hot = sigma_sp2_cold / gamma_i_mean;
+            const real_t sigma_tot_hot = (real_t)2.0 * SQR(B_BG) * sigma0 / (gamma_e_mean + mass_ratio * gamma_i_mean);
+
+            //* ---- pressure balance (units of n0 * m_e * c^2) ----------------------
+            //*   magnetic   P_mag = sigma0 * B^2 / 2
+            //*   upstream   P_th  = n_e*theta_e + n_i*theta_i*mr = theta_e   (n_bg total = 1)
+            //*   sheet      P_cs  = cs_density * theta_e / gamma_d           (both species)
+            const real_t P_mag       = sigma0 * SQR(B_BG) / (real_t)2.0;
+            const real_t P_th        = T_bg_e;
+            const real_t P_cs        = cs_density * T_cs_e / gamma_d;
+            const real_t plasma_beta = P_th / P_mag;
+
+            //* ---- the two invariants that must hold at t = 0 -----------------------
+            const real_t J_required = AMP_COEFF * B_BG / cs_width;      //* set by curl B
+            const real_t J_supplied = (real_t)2.0 * n_cs_per * beta_d;  //* set by the drift
+            const real_t J_ratio    = J_supplied / J_required;
+            const real_t P_ratio    = P_cs / P_mag;
+
+            constexpr int LW1 = 34;
+            constexpr int LW2 = 30;
+            auto kv1 = [&](const std::string& label) -> std::string { std::ostringstream t; t << "\t"   << std::left << std::setw(LW1) << label << "= "; return t.str(); };
             auto kv2 = [&](const std::string& label) -> std::string { std::ostringstream t; t << "\t\t" << std::left << std::setw(LW2) << label << "= "; return t.str(); };
             const std::string SP2u = is_pair ? "Positrons" : "Ions";
             const std::string sp2s = is_pair ? "positrons" : "ions";
@@ -428,28 +472,43 @@ namespace user
             }
             oss << kv1("Grid size [d0]") << dx << "\n"
                 << kv1("Current sheet at y [d0]") << cs_y << "\n"
+                << kv1("CS half-thickness [cells]") << cs_width / dx << "\n"
+                << kv1("CS full thickness [cells]") << (real_t)2.0 * cs_width / dx << "\n"
                 << kv1("Y boundaries") << (inject_y ? "INJECTION" : "REFLECTION") << "\n"
-                << kv1("Runtime [cold electron freq.] ") << t_wpe << "\n"
-                << kv1("Runtime [cold " + sp2 + " freq.] ") << t_wpi << "\n"
-                << kv1("Runtime [c/L]") << t_Lx << "\n\n"
+                << kv1("Runtime [cold electron freq.]") << t_wpe << "\n"
+                << kv1("Runtime [cold " + sp2 + " freq.]") << t_wpi << "\n"
+                << kv1("Runtime [c/Lx]") << t_Lx << "\n\n"
+
+                << "NORMALISATIONS\n"
+                << kv1("sigma0 [(d0/larmor0)^2]") << sigma0 << "\n"
+                << kv1("J/curl(B) factor [d0^2/larmor0]") << AMP_COEFF << "\n"
+                << kv1("n_bg per species [n0]") << n_bg_per << "\n"
+                << kv1("n_CS per species [n0]") << n_cs_per << "\n"
+                << kv1("ppc0 per species") << HALF * params.template get<real_t>("particles.ppc0") << "\n\n"
 
                 << "MASS / MAGNETISATION\n"
-                << kv1("Mass ratio [m_i/m_e]") << mass_ratio << "\n"
-                << kv1("Sigma (" + sp2 + ")") << sigma_ion << "\n"
-                << kv1("Sigma (electron, cold)") << sigma_e_cold << "\n"
-                << kv1("Sigma (electron, hot)") << sigma_e_hot << "\n"
-                << kv1("Mean electron Lorentz factor") << gamma_e_mean << "\n"
-                << kv1("B_BG [B0]") << B_BG << "\n"
-                << kv1("Guide field [Bg/B0]") << guide_field << "\n\n"
+                << kv1("Mass ratio [m_i/m_e]")            << mass_ratio     << "\n"
+                << kv1("Background field [B0 = 1/larmor0]") << B_BG           << "\n"
+                << kv1("Guide field [Bg/B0]")             << guide_field    << "\n"
+                << "\tMagnetisation (cold)\n"
+                << kv2("total")                           << sigma_tot_cold << "\n"
+                << kv2("electrons")                       << sigma_e_cold   << "\n"
+                << kv2(sp2s)                              << sigma_sp2_cold << "\n"
+                << "\tMagnetisation (hot)\n"
+                << kv2("total")                           << sigma_tot_hot  << "\n"
+                << kv2("electrons")                       << sigma_e_hot    << "\n"
+                << kv2(sp2s)                              << sigma_sp2_hot  << "\n"
+                << kv1("Mean Lorentz factor (electrons)") << gamma_e_mean   << "\n"
+                << kv1("Mean Lorentz factor (" + sp2s + ")") << gamma_i_mean << "\n\n"
 
                 << "CHARACTERISTIC SCALES\n"
                 << "\tElectrons\n"
-                << kv2("Skin depth") << d_e       << "  (resolved with " << d_e / dx       << " cells)\n"
-                << kv2("Larmor radius") << rho_e << "  (resolved with " << rho_e / dx     << " cells)\n"
+                << kv2("Skin depth") << d_e << "  (resolved with " << d_e / dx << " cells)\n"
+                << kv2("Larmor radius") << rho_e << "  (resolved with " << rho_e / dx << " cells)\n"
                 << kv2("Debye length") << lambda_De << "  (resolved with " << lambda_De / dx << " cells)\n"
                 << "\t" << SP2u << "\n"
-                << kv2("Skin depth") << d_i       << "  (resolved with " << d_i / dx       << " cells)\n"
-                << kv2("Larmor radius") << rho_i << "  (resolved with " << rho_i / dx     << " cells)\n"
+                << kv2("Skin depth") << d_i << "  (resolved with " << d_i / dx << " cells)\n"
+                << kv2("Larmor radius") << rho_i << "  (resolved with " << rho_i / dx << " cells)\n"
                 << kv2("Debye length") << lambda_Di << "  (resolved with " << lambda_Di / dx << " cells)\n\n"
 
                 << "TEMPERATURES (theta = kT/mc^2)\n"
@@ -460,6 +519,23 @@ namespace user
                 << kv2("electrons") << T_cs_e << "\n"
                 << kv2(sp2s) << T_cs_i << "\n\n"
 
+                << "CURRENT SHEET\n"
+                << kv1("Overdensity [n_CS/n_BG]") << cs_density << "\n"
+                << kv1("Half-thickness [d0]") << cs_width << "\n"
+                << kv1("Drift four-velocity [u]") << drift_u << "\n"
+                << kv1("beta = v/c") << beta_d << "\n"
+                << kv1("Lorentz factor of drift") << gamma_d << "\n"
+                << kv1("J required [curl(B)]") << J_required << "\n"
+                << kv1("J supplied [2 n_CS beta]") << J_supplied << "\n"
+                << kv1("2 n_CS beta/curl(B) (must be 1)") << J_ratio << "\n\n"
+
+                << "PRESSURE BALANCE\n"
+                << kv1("Thermal (upstream)") << P_th << "\n"
+                << kv1("Magnetic (upstream)") << P_mag << "\n"
+                << kv1("Thermal (CS)") << P_cs << "\n"
+                << kv1("P(CS,th)/P(US,mag) (must be 1)") << P_ratio << "\n"
+                << kv1("Plasma beta (upstream)") << plasma_beta << "\n\n"
+
                 << "TURBULENCE\n"
                 << kv1("Amplitude [dB/B0] (per comp)") << turb_amp << "\n"
                 << kv1("Mode band [kmin, kmax]") << "[" << kmin << ", " << kmax << "]\n"
@@ -467,32 +543,31 @@ namespace user
                 << kv1("Spectral index [p]") << spectral_index << "\n"
                 << kv1("Number of modes") << modes_host.size() << "\n\n"
 
-                << "CURRENT SHEET\n"
-                << kv1("Overdensity [n_CS/n_BG]") << cs_density << "\n"
-                << kv1("Half-thickness [d0]") << cs_width << "\n"
-                << kv1("Thermal spread of " + sp2s) << T_cs_i << "\n"
-                << kv1("Thermal spread of electrons") << T_cs_e << "\n"
-                << kv1("Drift four-velocity [u]") << drift_u << "\n"
-                << kv1("beta = v/c ") << beta_d << "\n"
-                << kv1("Lorentz factor of particles") << gamma_d << "\n\n"
-                
-                << "PRESSURE BALANCE\n"
-                << kv1("Thermal pressure (CS)") << P_cs << "\n"
-                << kv1("Thermal pressure (upstream)") << P_th << "\n"
-                << kv1("Magnetic pressure (upstream)") << P_mag << "\n"
-                << kv1("Plasma beta (upstream)") << plasma_beta << "\n\n"
                 << "===========================================================\n";
 
-            std::cout << oss.str() << std::endl;
+            //* Rank 0 alone prints and writes the file
+            if (mpi_rank == 0)
+            {
+                std::cout << oss.str() << std::endl;
 
-            //* Write to <simulation.name>/Simulation_params.txt
-            const std::string sim_name = params.template get<std::string>("simulation.name");
-            std::string path = sim_name;
-            if (!path.empty() && path.back() != '/') path += '/';
-            path += "Simulation_params.txt";
-            std::ofstream fout(path);
-            if (fout.is_open()) { fout << oss.str(); fout.close(); }
-            else { std::cout << "WARNING: could not write " << path << std::endl; }
+                //* Write to <simulation.name>/Simulation_params.txt
+                const std::string sim_name = params.template get<std::string>("simulation.name");
+                std::string path = sim_name;
+                if (!path.empty() && path.back() != '/') path += '/';
+                path += "Simulation_params.txt";
+                std::ofstream fout(path);
+                if (fout.is_open()) { fout << oss.str(); fout.close(); }
+                else { std::cout << "WARNING: could not write " << path << std::endl; }
+            }
+
+            //! ERRORS
+            raise::ErrorIf(std::fabs((double)(J_ratio - ONE)) > 1.0e-3,
+                           "Ampere mismatch: the drifting population does not supply the current required by the field.\n"
+                           "Check AMP_COEFF in make_init and cs_density.", HERE);
+
+            raise::ErrorIf(std::fabs((double)(P_ratio - ONE)) > 1.0e-3,
+                           "Initial Harris pressure balance violated: the sheet will pinch or expand.\n"
+                           "Check the sigma0 factor in T_cs.", HERE);
         }
 
         //! =========================================================
