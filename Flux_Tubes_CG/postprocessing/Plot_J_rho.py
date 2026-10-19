@@ -8,39 +8,30 @@ Usage:
     input="/scratch/project_465002528/pjd/flux_tubes/tubes/fields/"
     output="/scratch/project_465002528/pjd/flux_tubes/tubes/plots/"
 
-    srun python3 ../postprocessing/Plot_J_rho.py "$input" "$output" --r_j 100.0
+    srun python3 ../postprocessing/Plot_J_rho.py "$input" "$output" --Lx 256.0 --r_j 64.0
+
+    Required:
+        --Lx    box length along X in code units (sets the t c/L_x normalisation AND the x axis)
+        --r_j   tube radius in code units        (sets the t c/R   normalisation)
+
+    Optional:
+        --Ly    box length along Y in code units (default: same as --Lx)
 
 2D/3D compatibility
 -------------------
     Fields from a 2D run have shape (Nx, Ny).
     Fields from a 3D run have shape (Nx, Ny, Nz).
-    The script detects the dimensionality from the shape of the first
-    field array after reading and slices accordingly:
+    The script detects the dimensionality from the shape of the first field array after reading and
+    slices accordingly:
       - 2D: use the array directly (no slicing needed).
       - 3D: take a slice at the mid-plane along the third axis (Nz // 2).
 
-Time labels
------------
-    Filenames are fields.NNNNNNNNN.bp where NNNNNNNNN is the timestep index.
-    Simulation time is read from the "Time" variable in the BP file.
-
-    Two physical timescales are shown in the title:
-      t / (R/c)    light crossing times of the tube radius r_j  (c = 1)
-      t * omega_pe plasma frequency units; omega_pe = 1/skindepth = 1/1.0 = 1
-                   so t_pe = t_code exactly (skindepth hardcoded to 1.0)
-
 Force-free diagnostic
 ---------------------
-    The sixth panel plots |J x B| / (|J| |B|) = sin(theta), the angle between
-    J and B. This is the correct force-free metric: J x B = 0 (Lorentz force
-    density zero) is the definition of force-free, so this quantity -> 0 in a
-    perfect equilibrium and grows where J is NOT aligned with B.
+    The sixth panel plots |J x B| / (|J| |B|) = sin(theta), the angle between J and B. This is the
+    correct force-free metric: J x B = 0 (Lorentz force density zero) is the definition of force-free,
+    so this quantity -> 0 in a perfect equilibrium and grows where J is NOT aligned with B.
 
-    >>> CHECK: J and B must be co-located on the grid for this to be exact.
-        If Entity stores J and B at different Yee positions, a half-cell
-        stagger creates a spurious perpendicular component and makes the
-        state look LESS force-free than it is. If the sin(theta) panel shows
-        a one-cell-wide bright rim everywhere, suspect stagger, not physics.
 """
 
 import numpy as np
@@ -52,13 +43,10 @@ import argparse, os, glob
 import matplotlib.pyplot as plt
 
 #! ============================================================
-#! Hardcoded physical constants
+#! Settings
 #! ============================================================
-SKINDEPTH = 1.0   # d_e in code length units — hardcoded
-                  # omega_pe = c / d_e = 1/1.0 = 1
-                  # so t * omega_pe = t_code exactly
-
-TIME_KEY  = "Time"
+TIME_KEY = "Time"
+N_TICKS  = 5          #! exactly this many equidistant ticks on BOTH axes of EVERY panel
 
 #! ============================================================
 #! MPI setup
@@ -71,41 +59,44 @@ size = comm.Get_size()
 #! Args
 #! ============================================================
 parser = argparse.ArgumentParser()
-parser.add_argument("base",   type=str,
-                    help="Directory with fields.NNNNNNNNN.bp files")
-parser.add_argument("outdir", type=str,
-                    help="Output directory for PNG plots")
-parser.add_argument("--r_j",  type=float, default=50.0,
-                    help="Tube radius in code length units (default: 50.0)")
+parser.add_argument("base",   type=str, help="Directory with fields.NNNNNNNNN.bp files")
+parser.add_argument("outdir", type=str, help="Output directory for PNG plots")
+parser.add_argument("--Lx",   type=float, required=True, help="Box length along X in code units; also sets the axis extent and ticks")
+parser.add_argument("--Ly",   type=float, default=None,  help="Box length along Y in code units (default: same as --Lx)")
+parser.add_argument("--r_j",  type=float, required=True, help="Tube radius in code length units")
 
 args   = parser.parse_args()
 base   = args.base
 outdir = args.outdir
+Lx     = args.Lx
+Ly     = args.Ly if args.Ly is not None else args.Lx
 r_j    = args.r_j
+
+if Lx <= 0.0:
+    parser.error("--Lx must be positive")
+if Ly <= 0.0:
+    parser.error("--Ly must be positive")
+if r_j <= 0.0:
+    parser.error("--r_j must be positive")
 
 if rank == 0:
     os.makedirs(outdir, exist_ok=True)
 comm.Barrier()
 
 #! ============================================================
-#! Find all files & distribute across ranks
+#! Helpers
 #! ============================================================
 files = sorted(glob.glob(f"{base}/fields.*.bp"))
 
 if rank == 0:
     print(f"Found {len(files)} files", flush=True)
-    print(f"    skindepth (d_e) = {SKINDEPTH} (hardcoded)", flush=True)
-    print(f"    r_j             = {r_j} [d_e]", flush=True)
-    print(f"    omega_pe        = {1.0/SKINDEPTH:.4f}", flush=True)
+    print(f"    Box length L_x [d_e] = {Lx}", flush=True)
+    print(f"    Box length L_y [d_e] = {Ly}", flush=True)
+    print(f"    Tube radius R  [d_e] = {r_j}", flush=True)
     print(" ", flush=True)
 
 files_local = files[rank::size]
 
-#! ============================================================
-#! Helper: extract timestep index from filename
-#!   fields.000000001.bp -> 1
-#!   fields.000000251.bp -> 251
-#! ============================================================
 def step_from_fname(fname):
     base_name = os.path.basename(fname)
     stem      = base_name.rsplit(".", 1)[0]
@@ -114,9 +105,6 @@ def step_from_fname(fname):
     except ValueError:
         return -1
 
-#! ============================================================
-#! Helper: read simulation time from BP file.
-#! ============================================================
 def read_time(stream):
     try:
         val = stream.read(TIME_KEY)
@@ -129,6 +117,15 @@ def read_time(stream):
     except Exception:
         pass
     return float("nan")
+
+def set_equidistant_ticks(ax, xlo, xhi, ylo, yhi, n=N_TICKS):
+    xt = np.linspace(xlo, xhi, n)
+    yt = np.linspace(ylo, yhi, n)
+    ax.set_xticks(xt)
+    ax.set_yticks(yt)
+    ax.set_xticklabels([f"{v:g}" for v in xt])
+    ax.set_yticklabels([f"{v:g}" for v in yt])
+    ax.minorticks_off()                     #! "no more, no less" -> no minor ticks either
 
 #! ============================================================
 #! Loop over assigned files
@@ -192,13 +189,10 @@ for fname in files_local:
     # JxB_norm is sin(theta) in [0, 1]; 0 = force-free.
 
     #! ========================================================
-    #! Physical time labels
+    #! Physical time labels: BOTH are light crossing times (c = 1).
     #! ========================================================
     if not np.isnan(t_code):
-        t_lc = t_code / r_j
-        t_pe = t_code / SKINDEPTH
-        time_label = (f"$t\\,c/R = {t_lc:.3f}$   |   "
-                      f"$t\\,\\omega_{{pe}} = {t_pe:.1f}$")
+        time_label = f"$t\\,c/L_x = {t_code / Lx:.3f}$   |   $t\\,c/R = {t_code / r_j:.3f}$"
     else:
         time_label = f"step {step_idx:09d}   (time not found — check TIME_KEY)"
 
@@ -208,14 +202,14 @@ for fname in files_local:
     fig, axs = plt.subplots(2, 3, figsize=(12, 6))
 
     field_limits = {
-        "Jx":  None,
-        "Jy":  None,
-        "Jz":  None,
-        "|J|": None,
-        "rho": None,
+        "Jx":  0.3,
+        "Jy":  0.3,
+        "Jz":  0.6,
+        "|J|": 0.6,
+        "rho": 1.0,
         # Force-free metric: fix floor at 0 so the map reads as
         # "distance from force-free" rather than a stretched percentile band.
-        "|JxB|/(|J||B|)": (0.0, None),
+        "|JxB|/(|J||B|)": (0.0, 1.0),
     }
 
     cmaps = {
@@ -236,39 +230,47 @@ for fname in files_local:
         (JxB_norm, "|JxB|/(|J||B|)"),
     ]
 
+    x_lo, x_hi = 0.0, Lx
+    y_lo, y_hi = 0.0, Ly
+
+    #! sanity check: the file should agree with --Lx/--Ly to within about one cell
+    if rank == 0 and fname == files_local[0]:
+        dx_est, dy_est = (x.max() - x.min()) / max(x.size - 1, 1), (y.max() - y.min()) / max(y.size - 1, 1)
+        if abs(x.max() - x.min() + dx_est - Lx) > 2.0 * dx_est or abs(y.max() - y.min() + dy_est - Ly) > 2.0 * dy_est:
+            print(f"  [warn] file extent is x:[{x.min():g},{x.max():g}] y:[{y.min():g},{y.max():g}] but --Lx={Lx:g} --Ly={Ly:g}", flush=True)
+
     for ax, (data, label) in zip(axs.flat, fields):
 
         limits = field_limits[label]
         cmap   = cmaps[label]
 
-        if limits is not None:
-            vmin, vmax = limits
-            # Allow a fixed floor with auto top (vmax = None -> 99th pct).
-            if vmax is None:
-                vmax = np.percentile(data, 99)
-        else:
+        if limits is None:
+            #* automatic percentile scaling
             if cmap == "seismic":
                 vmax = np.percentile(np.abs(data), 99)
                 vmin = -vmax
             else:
                 vmin = np.percentile(data, 1)
                 vmax = np.percentile(data, 99)
+        elif np.isscalar(limits):
+            #* a single number means a symmetric range for diverging maps, and 0 -> limit for sequential ones
+            if cmap == "seismic":
+                vmin, vmax = -float(limits), float(limits)
+            else:
+                vmin, vmax = 0.0, float(limits)
+        else:
+            #* explicit (vmin, vmax) pair
+            vmin, vmax = limits
 
-        im = ax.imshow(
-            data,
-            origin="lower",
-            aspect="equal",
-            extent=[x.min(), x.max(), y.min(), y.max()],
-            cmap=cmap,
-            vmin=vmin,
-            vmax=vmax,
-        )
+        im = ax.imshow(data, origin="lower", aspect="equal", extent=[x_lo, x_hi, y_lo, y_hi], cmap=cmap, vmin=vmin, vmax=vmax)
 
         ax.set_title(label)
         ax.tick_params(axis="both", which="major", labelsize=10, length=6)
-        ax.tick_params(axis="both", which="minor", labelsize=8, length=3)
-        ax.set_xlabel(r"$x\,/\,d_{e}$")
-        ax.set_ylabel(r"$y\,/\,d_{e}$")
+        ax.set_xlabel(r"$x [d_{e}]$")
+        ax.set_ylabel(r"$y [d_{e}]$")
+
+        #! exactly 5 equidistant ticks + labels on each axis of this panel
+        set_equidistant_ticks(ax, x_lo, x_hi, y_lo, y_hi)
 
         fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
 
@@ -281,10 +283,8 @@ for fname in files_local:
 
     print(f"Saved {outfile}", flush=True)
 
-#! ============================================================
-#! Sync
-#! ============================================================
 comm.Barrier()
 
 if rank == 0:
     print("\nDone.", flush=True)
+    print("\n--------------------------\n\n", flush=True)

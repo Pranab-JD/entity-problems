@@ -1,115 +1,97 @@
 """
-Created on Sat Jun 13 17:32 2026
+Created on Sat Jun 13 2026
 
 @author: Pranab JD, Claude AI
 
-Plot particle spectra dN/dgamma from spectra.*.bp files,
-overlaid on a single log-log plot with colour encoding time.
+Plot particle spectra dN/dln(gamma-1) from entity's spectra.*.bp files.
+One panel per species, lines overlaid and coloured by t c / L_x.
 
 Usage
 -----
-    folder="/scratch/project_465002528/pjd/flux_tubes_CG/2D_512_test/"
-    spectra="${folder}tubes/spectra"
-    output="${folder}tubes/plots"
+    spectra="/scratch/project_465003132/RMR_pair_3D/sigma_10_Z100/RMR/spectra"
+    output="/scratch/project_465003132/RMR_pair_3D/sigma_10_Z100/RMR/plots"
 
-    srun python3 -u ../postprocessing/Plot_spectra.py "$spectra" "$output" --species 1,2 \
-                --r_j 128.0 --xmin 5e-5 --xmax 1e2 --ymin 5e3 --ymax 3e7
+    srun -N 1 -n 1 python3 -u ../postprocessing/Plot_spectra.py "$spectra" "$output" \
+        --Lx 256 --R 64 --larmor0 0.5 --pair
+
+    Required:
+        --Lx          box length along X in code units (sets the t c/L_x normalisation)
+        --larmor0     [scales] larmor0, for the gyroradius axis along the top
 
     Optional:
-        --r_j        tube radius in d_e, for the t c/R label    (default 100.0)
-        --species    comma-separated species indices to plot    (default "1,2")
-        --xmin       lower x-axis (gamma-1) limit               (default: auto)
-        --xmax       upper x-axis (gamma-1) limit               (default: auto)
-        --ymin       lower y-axis (dN/dgamma) limit             (default: auto)
-        --ymax       upper y-axis (dN/dgamma) limit             (default: auto)
-        --list_vars  just print the BP variable names and exit  (schema discovery)
-
+        --R           tube radius in code units; adds t c/R to the figure title
+        --pair        species 2 is a POSITRON (light limits); default treats it as an ION
+        --mass-ratio  species 2 / species 1 mass, for its gyroradius axis (default 1)
+        --species     comma-separated species indices (default "1,2")
+        --list_vars   print the BP variable names and exit
 """
 
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")
+
 from adios2 import Stream
+
 import argparse, os, glob
 import matplotlib.pyplot as plt
 from matplotlib import cm
 from matplotlib.colors import Normalize
 
 #! ============================================================
-#! Schema settings — EDIT if --list_vars shows different names
+#! USER SETTINGS
 #! ============================================================
-# Candidate names for the energy/gamma bin array (first match wins).
-# Entity writes 'sEbn' (confirmed via --list_vars).
-BIN_VAR_CANDIDATES   = ["sEbn", "ebins", "e_bins", "bins", "sebn", "energy", "gamma"]
-# Candidate templates for per-species count arrays ({s} -> species index).
-# Entity writes 'sN_1', 'sN_2' (confirmed via --list_vars).
-COUNT_VAR_TEMPLATES  = ["sN_{s}", "sN{s}", "spectrum_{s}", "f_{s}", "N{s}"]
+#! Axis limits; None -> auto on that side. The Y limits are shared by every species.
+#! Y is a RATIO to the initial peak, not a count, so 1.0 is the t = 0 peak.
+Y_MIN, Y_MAX           = 1e-4, 2.0
+XLIGHT_MIN, XLIGHT_MAX = 1e-4, 1e3        #! electrons and positrons
+XION_MIN, XION_MAX     = 5e-5, 1e0        #! ions
 
-# If counts are raw dN per bin and you want dN/dE, divide by bin width.
-# If Entity already stores dN/dE, set this False.
-NORMALISE_BY_BIN_WIDTH = False
-
-TIME_KEY = "Time"
+TIME_KEY   = "Time"
+BIN_VARS   = ["sEbn", "ebins", "e_bins", "bins", "energy", "gamma"]        #! first match wins
+COUNT_VARS = ["sN_{s}", "sN{s}", "spectrum_{s}", "f_{s}", "N{s}"]          #! {s} = species index
 
 #! ============================================================
 #! Args
 #! ============================================================
 parser = argparse.ArgumentParser()
-parser.add_argument("base",   type=str, help="Directory with spectra.*.bp files")
-parser.add_argument("outdir", type=str, help="Output directory for the PNG")
-parser.add_argument("--r_j",  type=float, default=100.0,
-                    help="Tube radius in d_e, for the t c/R label (default 100.0)")
-parser.add_argument("--species", type=str, default="1,2",
-                    help="Comma-separated species indices (default '1,2')")
-parser.add_argument("--xmin", type=float, default=None,
-                    help="Lower x-axis (gamma-1) limit (default: auto)")
-parser.add_argument("--xmax", type=float, default=None,
-                    help="Upper x-axis (gamma-1) limit (default: auto)")
-parser.add_argument("--ymin", type=float, default=None,
-                    help="Lower y-axis (dN/dgamma) limit (default: auto)")
-parser.add_argument("--ymax", type=float, default=None,
-                    help="Upper y-axis (dN/dgamma) limit (default: auto)")
-parser.add_argument("--list_vars", action="store_true",
-                    help="Print BP variable names from the first file and exit")
+parser.add_argument("base",         type=str)
+parser.add_argument("outdir",       type=str)
+parser.add_argument("--Lx",         type=float, required=True)
+parser.add_argument("--R",          type=float, default=None, help="tube radius in code units; adds t c/R to the title")
+parser.add_argument("--larmor0",    type=float, required=True)
+parser.add_argument("--mass-ratio", dest="mass_ratio", type=float, default=1.0)
+parser.add_argument("--species",    type=str, default="1,2")
+parser.add_argument("--pair",       action="store_true")
+parser.add_argument("--list_vars",  action="store_true")
+
 args = parser.parse_args()
 
-BASE     = args.base
-OUTDIR   = args.outdir
-R_J      = args.r_j
-SPECIES  = [int(s) for s in args.species.split(",") if s.strip() != ""]
-XMIN     = args.xmin
-XMAX     = args.xmax
-YMIN     = args.ymin
-YMAX     = args.ymax
+BASE, OUTDIR = args.base, args.outdir
+SPECIES      = [int(s) for s in args.species.split(",") if s.strip() != ""]
+IS_PAIR      = args.pair
+LX, LARMOR0  = float(args.Lx), float(args.larmor0)
+R_TUBE       = float(args.R) if args.R is not None else None
+MR           = float(args.mass_ratio)
+
+if LX <= 0.0:
+    parser.error("--Lx must be positive")
+if LARMOR0 <= 0.0:
+    parser.error("--larmor0 must be positive")
+if R_TUBE is not None and R_TUBE <= 0.0:
+    parser.error("--R must be positive")
 
 os.makedirs(OUTDIR, exist_ok=True)
 
-#! ============================================================
-#! Find files
-#! ============================================================
 files = sorted(glob.glob(f"{BASE}/spectra.*.bp"))
 if len(files) == 0:
-    raise SystemExit(
-        f"No spectra.*.bp files found in {BASE}\n"
-        f"  - Is [output.spectra] enable = true in the TOML? (it defaults to false)\n"
-        f"  - Did the run actually write spectra, and to this directory?\n"
-        f"  (Refusing to fall back to *.bp — that would read fields.*.bp by mistake.)")
-
-print(f"Found {len(files)} spectra files", flush=True)
+    raise SystemExit(f"No spectra.*.bp in {BASE}   (is [output.spectra] enable = true in the TOML?)")
 
 #! ============================================================
 #! Helpers
 #! ============================================================
-def step_from_fname(fname):
-    stem = os.path.basename(fname).rsplit(".", 1)[0]
-    try:
-        return int(stem.split(".")[-1])
-    except ValueError:
-        return -1
-
 def read_time(stream):
-    for getter in (lambda: stream.read(TIME_KEY),
-                   lambda: stream.read_attribute(TIME_KEY)):
+    """Simulation time in code units: variable first, then attribute."""
+    for getter in (lambda: stream.read(TIME_KEY), lambda: stream.read_attribute(TIME_KEY)):
         try:
             v = getter()
             if v is not None:
@@ -119,31 +101,42 @@ def read_time(stream):
     return float("nan")
 
 def available_vars(stream):
-    """Return a list of variable names present in the BP step."""
     try:
         return list(stream.available_variables().keys())
     except Exception:
-        try:
-            return list(stream.available_variables())
-        except Exception:
-            return []
+        return []
 
-def pick_bin_var(varnames):
-    for cand in BIN_VAR_CANDIDATES:
-        if cand in varnames:
-            return cand
-    return None
-
-def pick_count_var(varnames, s):
-    for tmpl in COUNT_VAR_TEMPLATES:
-        name = tmpl.format(s=s)
-        if name in varnames:
+def pick_var(names, candidates, s=None):
+    """First candidate present in the file; {s} is filled with the species index when given."""
+    for cand in candidates:
+        name = cand.format(s=s) if s is not None else cand
+        if name in names:
             return name
     return None
 
-#! ============================================================
-#! --list_vars : dump schema and exit
-#! ============================================================
+def species_info(sp):
+    """
+    Label, X limits and the gyroradius scaling for one species index. Species 1 is the electron;
+    species 2 is a positron with --pair and an ion otherwise. r_L = larmor0 * (m/m_e) * u, so the heavy
+    species needs the mass ratio in its top axis.
+    """
+    if sp == 1:
+        return "Electron", XLIGHT_MIN, XLIGHT_MAX, 1.0
+    if sp == 2:
+        return ("Positron", XLIGHT_MIN, XLIGHT_MAX, 1.0) if IS_PAIR else ("Ions", XION_MIN, XION_MAX, MR)
+    return f"Species {sp}", XLIGHT_MIN, XLIGHT_MAX, 1.0
+
+def dN_dlng(bins, counts):
+    """
+    Bin centres, dN/dln(gamma-1), and the mask of plottable bins for one spectrum.
+    Factored out so a curve and the reference it is normalised by are computed identically.
+    """
+    x = 0.5 * (bins[1:] + bins[:-1]) if bins.size == counts.size + 1 else bins
+    with np.errstate(divide="ignore", invalid="ignore"):
+        y = counts / np.gradient(np.log(x))      #! counts per bin -> dN/dln(gamma-1)
+    good = (x > 0) & (counts > 0) & np.isfinite(y)
+    return x, y, good
+
 if args.list_vars:
     with Stream(files[0], "r") as s:
         next(s.steps())
@@ -151,119 +144,92 @@ if args.list_vars:
     print(f"\nVariables in {os.path.basename(files[0])}:")
     for n in names:
         print("   ", n)
-    print("\nEdit BIN_VAR_CANDIDATES / COUNT_VAR_TEMPLATES at the top of this "
-          "script if the defaults don't match.\n")
+    print("\nEdit BIN_VARS / COUNT_VARS at the top if these do not match.\n")
     raise SystemExit(0)
 
 #! ============================================================
-#! Read all spectra
-#!   spectra_by_species[s] = list of (time, bins, counts)
+#! Read every file:  spectra[sp] = list of (t c/L_x, bins, counts)
 #! ============================================================
-spectra_by_species = {s: [] for s in SPECIES}
-times_seen = []
+print(f"\nFound {len(files)} spectra files   (L_x = {LX:g}, larmor0 = {LARMOR0:g})", flush=True)
+
+spectra    = {sp: [] for sp in SPECIES}
+times      = []                                   #! t c / L_x, used for the colour scale
+times_code = []                                   #! raw t in code units, used for the title
 
 for fname in files:
     with Stream(fname, "r") as s:
         next(s.steps())
         names  = available_vars(s)
-        t_code = read_time(s)
+        t_code = read_time(s)                        #! NaN propagates if Time is missing
+        t_lc   = t_code / LX
 
-        bin_var = pick_bin_var(names)
-        if bin_var is None:
-            # auto-detect: a 1D, monotonic-increasing float array is likely bins
-            for n in names:
-                try:
-                    arr = np.asarray(s.read(n)).ravel()
-                except Exception:
-                    continue
-                if arr.ndim == 1 and arr.size > 3 and np.all(np.diff(arr) > 0):
-                    bin_var = n
-                    break
+        bin_var = pick_var(names, BIN_VARS)
         if bin_var is None:
             print(f"  [skip] {os.path.basename(fname)}: no bin array found", flush=True)
             continue
-
         bins = np.asarray(s.read(bin_var)).ravel()
 
         for sp in SPECIES:
-            cvar = pick_count_var(names, sp)
-            if cvar is None:
-                continue
-            counts = np.asarray(s.read(cvar)).ravel()
-            spectra_by_species[sp].append((t_code, bins, counts))
+            cvar = pick_var(names, COUNT_VARS, sp)
+            if cvar is not None:
+                spectra[sp].append((t_lc, bins, np.asarray(s.read(cvar)).ravel()))
+    times.append(t_lc)
+    times_code.append(t_code)
 
-    times_seen.append(t_code)
-
-# report what we got
 for sp in SPECIES:
-    print(f"    species {sp}: {len(spectra_by_species[sp])} spectra", flush=True)
+    print(f"    species {sp}: {len(spectra[sp])} spectra", flush=True)
 
 #! ============================================================
-#! Plot — one panel per species, overlaid lines coloured by time
+#! Plot: one panel per species, shared colourbar in t c / L_x
 #! ============================================================
-finite_times = [t for t in times_seen if np.isfinite(t)]
-tmin = min(finite_times) if finite_times else 0.0
-tmax = max(finite_times) if finite_times else 1.0
-norm = Normalize(vmin=tmin, vmax=tmax)
-cmap = cm.jet
+finite = [t for t in times if np.isfinite(t)]
+norm   = Normalize(vmin=min(finite) if finite else 0.0, vmax=max(finite) if finite else 1.0)
+cmap   = cm.jet
 
-n_sp = len([sp for sp in SPECIES if len(spectra_by_species[sp]) > 0])
-if n_sp == 0:
-    raise SystemExit("No spectra read — run with --list_vars and fix the var names.")
+to_plot = [sp for sp in SPECIES if len(spectra[sp]) > 0]
+if len(to_plot) == 0:
+    raise SystemExit("No spectra read -- run with --list_vars and fix the variable names.")
 
-fig, axs = plt.subplots(1, n_sp, figsize=(6 * n_sp, 5), squeeze=False,
-                        constrained_layout=True)
+fig, axs = plt.subplots(1, len(to_plot), figsize=(6 * len(to_plot), 5), squeeze=False, constrained_layout=True)
 axs = axs[0]
 
-panel = 0
-for sp in SPECIES:
-    series = spectra_by_species[sp]
-    if len(series) == 0:
-        continue
-    ax = axs[panel]; panel += 1
+for ax, sp in zip(axs, to_plot):
+    label, xlo, xhi, mass = species_info(sp)
 
-    for (t_code, bins, counts) in series:
-        # bin centres: if bins are EDGES (len = counts+1), take midpoints.
-        if bins.size == counts.size + 1:
-            x = 0.5 * (bins[1:] + bins[:-1])
-            widths = np.diff(bins)
-        else:
-            x = bins
-            # approximate widths from spacing for optional normalisation
-            widths = np.gradient(bins)
+    #! Normalisation reference: peak of the EARLIEST spectrum for this species
+    t0, bins0, counts0 = spectra[sp][0]
+    _, y0, good0       = dN_dlng(bins0, counts0)
+    ref_peak           = y0[good0].max() if np.any(good0) else 0.0
+    if not np.isfinite(ref_peak) or ref_peak <= 0.0:
+        print(f"  [warn] species {sp}: initial peak is {ref_peak!r}; plotting unnormalised", flush=True)
+        ref_peak = 1.0
+    print(f"    species {sp}: normalising by initial peak = {ref_peak:.6g}   (t c/L_x = {t0:.4g})", flush=True)
 
-        y = counts.astype(float)
-        if NORMALISE_BY_BIN_WIDTH:
-            with np.errstate(divide="ignore", invalid="ignore"):
-                y = np.where(widths > 0, y / widths, 0.0)
-
-        colour = cmap(norm(t_code)) if np.isfinite(t_code) else "gray"
-        # mask non-positive for log-log
-        good = (x > 0) & (y > 0)
-        ax.plot(x[good], y[good], color=colour, lw=1.2, alpha=0.85)
+    for (t_lc, bins, counts) in spectra[sp]:
+        x, y, good = dN_dlng(bins, counts)
+        y = y / ref_peak                         #! <- normalised to the initial peak
+        ax.plot(x[good], y[good], color=cmap(norm(t_lc)) if np.isfinite(t_lc) else "gray", lw=1.2, alpha=0.85)
 
     ax.set_xscale("log")
     ax.set_yscale("log")
-    ax.set_xlabel(r"$\gamma - 1$", fontsize = 14)
-    ax.set_ylabel(r"$dN/d\gamma$", fontsize = 14)
-    ax.set_title(f"Species {sp} spectrum", fontsize = 14)
+    ax.set_xlabel(r"$\gamma - 1$", fontsize=14)
+    ax.set_ylabel(r"$dN/d\ln(\gamma-1)$", fontsize=12)
+    ax.set_title(f"{label} spectrum", fontsize=14)
+    ax.set_xlim(left=xlo, right=xhi)
+    ax.set_ylim(bottom=Y_MIN, top=Y_MAX)
 
-    # user-defined x-axis limits (only the side(s) provided)
-    if (XMIN is not None) or (XMAX is not None):
-        ax.set_xlim(left=XMIN, right=XMAX)
+    #! top axis: the relativistic gyroradius of a particle at that energy, r_L = larmor0 * (m/m_e) * u
+    #! with u = sqrt(gamma^2 - 1). Valid at B = B_BG; inside the sheet the local field is smaller.
+    rL   = lambda gm1: LARMOR0 * mass * np.sqrt((gm1 + 1.0) ** 2 - 1.0)
+    gm1  = lambda r:   np.sqrt(1.0 + (r / (LARMOR0 * mass)) ** 2) - 1.0
+    secax = ax.secondary_xaxis("top", functions=(rL, gm1))
+    secax.set_xlabel(r"$r_L/d_0$", fontsize=14)
 
-    # user-defined y-axis limits (only the side(s) provided)
-    if (YMIN is not None) or (YMAX is not None):
-        ax.set_ylim(bottom=YMIN, top=YMAX)
-    
-# shared colourbar for time
 sm = cm.ScalarMappable(norm=norm, cmap=cmap)
 sm.set_array([])
-cbar = fig.colorbar(sm, ax=list(axs[:panel]), fraction=0.046, pad=0.02)
-cbar.set_label(r"$t\,\omega_{pe}$", fontsize = 14)
+fig.colorbar(sm, ax=list(axs), fraction=0.046, pad=0.02).set_label(r"$t\,c/L_x$", fontsize=14)
 
 outfile = os.path.join(OUTDIR, "spectra.png")
 fig.savefig(outfile, dpi=150, bbox_inches="tight")
 plt.close(fig)
-
-print(f"\nSaved {outfile}", flush=True)
+print(f"\nSaved {outfile}\n", flush=True)

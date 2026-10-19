@@ -1,7 +1,7 @@
 [simulation]
-    name    = "/scratch/project_465002528/pjd/flux_tubes_CG/2D_FF_T0.005/tubes"
+    name    = "/scratch/project_465002544/pranab/flux_tubes_CG/2D_FF/tubes"
     engine  = "srpic"
-    runtime = 100.0
+    runtime = 256.0
 
     [simulation.domain]
         decomposition = [-1, -1]
@@ -9,7 +9,7 @@
 
 [grid]
     resolution = [2560, 2560]
-    extent     = [[0.0, 128.0], [0.0, 128.0]]   #* Defined in terms of de
+    extent     = [[0.0, 256.0], [0.0, 256.0]]   #* Defined in terms of de
 
     [grid.metric]
         metric = "minkowski"
@@ -20,11 +20,12 @@
         fields    = [["PERIODIC"], ["PERIODIC"]]
         particles = [["PERIODIC"], ["PERIODIC"]]
 
+
 [algorithms]
-    current_filters = 0
+    current_filters = 2
 
     [algorithms.timestep]
-        CFL = 0.75
+        CFL = 0.5
 
 
 [particles]
@@ -45,18 +46,18 @@
 
 [scales]
     skindepth0 = 1.0                      #* de = skindepth0 = 1.0 code unit for pair plasma
-    larmor0    = 0.2                      #* sigma = (skindepth0/larmor0)**2
+    larmor0    = 0.5                      #* sigma = (skindepth0/larmor0)**2
     
 
 [setup]
     #* Plasma
-    background_temperature = 0.005        #* Background temperature (Debye length ~ sqrt(background_temperature))
-    guide_field_floor      = 0.000       #* Base/floor guide field (to avoid numerical instabilities)
+    background_temperature = 0.05         #* Background temperature (Debye length ~ sqrt(background_temperature))
+    guide_field_floor      = 0.01         #* Base/floor guide field (to avoid numerical instabilities)
     charge_correction      = true
     
     #* Flux Tubes
     kick_velocity          = 0.0          #* v/c --- E x B drift
-    tube_radius            = 32.0        #* Radius of each flux tube (in de; choose it to be Lx/4)
+    tube_radius            = 64.0         #* Radius of each flux tube (in de; choose it to be Lx/4)
     single_tube            = false        #* False = 2 flux tubes; True = 1 flux tube
 
 
@@ -65,22 +66,23 @@
 
     [output.fields]
         quantities  = ["N", "B", "E", "J"]
-        interval    = 100
+        interval    = 130
 
     [output.particles]
         enable      = false
 
     [output.spectra]
-        enable      = true
-        e_min       = 1e-5
-        e_max       = 1e4
-        log_bins    = true
-        n_bins      = 3600
-        interval    = 100
+        enable          = true
+        e_min           = 1e-6
+        e_max           = 1e6
+        log_bins        = true
+        num_energy_bins = 1200
+        interval        = 200
     
     [output.stats]
         quantities  = ["B^2", "E^2", "ExB", "J.E", "Rho", "T00"]
         interval    = 500
+
 
 [diagnostics]
     interval  = 500
@@ -88,5 +90,5 @@
 
 
 [checkpoint]
-    interval = 15000
+    interval = 2000
     keep     = 1
