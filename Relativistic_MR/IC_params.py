@@ -11,19 +11,19 @@ import math
 #! USER PARAMETERS  (edit to match your TOML)
 #! ============================================================
 
-resolution      = [1000, 500, 50]
-extent          = [[0.0, 200.0], [0.0, 100.0], [0.0, 10.0]]
+resolution      = [4000, 2000]
+extent          = [[0.0, 1000.0], [0.0, 500.0]]
 
 skindepth0      = 1.0        # [scales] skindepth0
-larmor0         = 0.5        # [scales] larmor0
+larmor0         = 0.3162       # [scales] larmor0
 mass_ratio      = 1.0        # species[1].mass / species[0].mass ; 1.0 = pair
 
-ppc0            = 10.0       # [particles] ppc0  (TOTAL over both species, per cell, at n_hat = 1)
+ppc0            = 24.0       # [particles] ppc0  (TOTAL over both species, per cell, at n_hat = 1)
 
-cs_density      = 20.0       # [setup] cs_density  (n_CS/n_BG, TOTAL over both species)
-cs_width        = 0.5        # [setup] cs_width    (half-thickness, d0)
+cs_density      = 10.0       # [setup] cs_density  (n_CS/n_BG, TOTAL over both species)
+cs_width        = 1.0        # [setup] cs_width    (half-thickness, d0)
 guide_field     = 0.0        # [setup] guide_field (Bg/B0)
-bg_theta_i      = 0.01       # [setup] bg_theta_i  (background theta of species 2)
+bg_theta_i      = 0.06        # [setup] bg_theta_i  (background theta of species 2)
 inject_y        = False      # [setup] inject_y
 
 runtime         = 200.0      # [simulation] runtime

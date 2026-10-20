@@ -12,13 +12,14 @@ Usage
     output="/scratch/project_465003132/RMR_pair_3D/sigma_10_Z100/RMR/plots"
 
     srun -N 1 -n 1 python3 -u ../postprocessing/Plot_spectra.py "$spectra" "$output" \
-        --Lx 200 --larmor0 0.3162 --pair
+        --Lx 256 --R 64 --larmor0 0.5 --pair
 
     Required:
         --Lx          box length along X in code units (sets the t c/L_x normalisation)
         --larmor0     [scales] larmor0, for the gyroradius axis along the top
 
     Optional:
+        --R           tube radius in code units; adds t c/R to the figure title
         --pair        species 2 is a POSITRON (light limits); default treats it as an ION
         --mass-ratio  species 2 / species 1 mass, for its gyroradius axis (default 1)
         --species     comma-separated species indices (default "1,2")
@@ -40,7 +41,8 @@ from matplotlib.colors import Normalize
 #! USER SETTINGS
 #! ============================================================
 #! Axis limits; None -> auto on that side. The Y limits are shared by every species.
-Y_MIN, Y_MAX           = 5e3,  2e8
+#! Y is a RATIO to the initial peak, not a count, so 1.0 is the t = 0 peak.
+Y_MIN, Y_MAX           = 1e-4, 2.0
 XLIGHT_MIN, XLIGHT_MAX = 1e-4, 1e3        #! electrons and positrons
 XION_MIN, XION_MAX     = 5e-5, 1e0        #! ions
 
@@ -55,6 +57,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("base",         type=str)
 parser.add_argument("outdir",       type=str)
 parser.add_argument("--Lx",         type=float, required=True)
+parser.add_argument("--R",          type=float, default=None, help="tube radius in code units; adds t c/R to the title")
 parser.add_argument("--larmor0",    type=float, required=True)
 parser.add_argument("--mass-ratio", dest="mass_ratio", type=float, default=1.0)
 parser.add_argument("--species",    type=str, default="1,2")
@@ -67,12 +70,15 @@ BASE, OUTDIR = args.base, args.outdir
 SPECIES      = [int(s) for s in args.species.split(",") if s.strip() != ""]
 IS_PAIR      = args.pair
 LX, LARMOR0  = float(args.Lx), float(args.larmor0)
+R_TUBE       = float(args.R) if args.R is not None else None
 MR           = float(args.mass_ratio)
 
 if LX <= 0.0:
     parser.error("--Lx must be positive")
 if LARMOR0 <= 0.0:
     parser.error("--larmor0 must be positive")
+if R_TUBE is not None and R_TUBE <= 0.0:
+    parser.error("--R must be positive")
 
 os.makedirs(OUTDIR, exist_ok=True)
 
@@ -120,9 +126,17 @@ def species_info(sp):
         return ("Positron", XLIGHT_MIN, XLIGHT_MAX, 1.0) if IS_PAIR else ("Ions", XION_MIN, XION_MAX, MR)
     return f"Species {sp}", XLIGHT_MIN, XLIGHT_MAX, 1.0
 
-#! ============================================================
-#! --list_vars: dump the schema and exit
-#! ============================================================
+def dN_dlng(bins, counts):
+    """
+    Bin centres, dN/dln(gamma-1), and the mask of plottable bins for one spectrum.
+    Factored out so a curve and the reference it is normalised by are computed identically.
+    """
+    x = 0.5 * (bins[1:] + bins[:-1]) if bins.size == counts.size + 1 else bins
+    with np.errstate(divide="ignore", invalid="ignore"):
+        y = counts / np.gradient(np.log(x))      #! counts per bin -> dN/dln(gamma-1)
+    good = (x > 0) & (counts > 0) & np.isfinite(y)
+    return x, y, good
+
 if args.list_vars:
     with Stream(files[0], "r") as s:
         next(s.steps())
@@ -138,14 +152,16 @@ if args.list_vars:
 #! ============================================================
 print(f"\nFound {len(files)} spectra files   (L_x = {LX:g}, larmor0 = {LARMOR0:g})", flush=True)
 
-spectra = {sp: [] for sp in SPECIES}
-times   = []
+spectra    = {sp: [] for sp in SPECIES}
+times      = []                                   #! t c / L_x, used for the colour scale
+times_code = []                                   #! raw t in code units, used for the title
 
 for fname in files:
     with Stream(fname, "r") as s:
         next(s.steps())
-        names = available_vars(s)
-        t_lc  = read_time(s) / LX                    #! NaN propagates if Time is missing
+        names  = available_vars(s)
+        t_code = read_time(s)                        #! NaN propagates if Time is missing
+        t_lc   = t_code / LX
 
         bin_var = pick_var(names, BIN_VARS)
         if bin_var is None:
@@ -158,6 +174,7 @@ for fname in files:
             if cvar is not None:
                 spectra[sp].append((t_lc, bins, np.asarray(s.read(cvar)).ravel()))
     times.append(t_lc)
+    times_code.append(t_code)
 
 for sp in SPECIES:
     print(f"    species {sp}: {len(spectra[sp])} spectra", flush=True)
@@ -179,18 +196,24 @@ axs = axs[0]
 for ax, sp in zip(axs, to_plot):
     label, xlo, xhi, mass = species_info(sp)
 
+    #! Normalisation reference: peak of the EARLIEST spectrum for this species
+    t0, bins0, counts0 = spectra[sp][0]
+    _, y0, good0       = dN_dlng(bins0, counts0)
+    ref_peak           = y0[good0].max() if np.any(good0) else 0.0
+    if not np.isfinite(ref_peak) or ref_peak <= 0.0:
+        print(f"  [warn] species {sp}: initial peak is {ref_peak!r}; plotting unnormalised", flush=True)
+        ref_peak = 1.0
+    print(f"    species {sp}: normalising by initial peak = {ref_peak:.6g}   (t c/L_x = {t0:.4g})", flush=True)
+
     for (t_lc, bins, counts) in spectra[sp]:
-        #! bin centres: if the file gives EDGES (len = counts + 1), take midpoints
-        x = 0.5 * (bins[1:] + bins[:-1]) if bins.size == counts.size + 1 else bins
-        with np.errstate(divide="ignore", invalid="ignore"):
-            y = counts / np.gradient(np.log(x))      #! counts per bin -> dN/dln(gamma-1)
-        good = (x > 0) & (counts > 0)                #! mask non-positive values for the log-log axes
+        x, y, good = dN_dlng(bins, counts)
+        y = y / ref_peak                         #! <- normalised to the initial peak
         ax.plot(x[good], y[good], color=cmap(norm(t_lc)) if np.isfinite(t_lc) else "gray", lw=1.2, alpha=0.85)
 
     ax.set_xscale("log")
     ax.set_yscale("log")
     ax.set_xlabel(r"$\gamma - 1$", fontsize=14)
-    ax.set_ylabel(r"$dN/d\ln(\gamma-1)$", fontsize=14)
+    ax.set_ylabel(r"$dN/d\ln(\gamma-1)$", fontsize=12)
     ax.set_title(f"{label} spectrum", fontsize=14)
     ax.set_xlim(left=xlo, right=xhi)
     ax.set_ylim(bottom=Y_MIN, top=Y_MAX)

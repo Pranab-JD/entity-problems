@@ -55,8 +55,10 @@ F_BX     = "fB1"         #! in-plane reversing field
 F_JZ     = "fJ3"         #! out-of-plane current
 F_N      = "fN"          #! number density
 
-#! Plot aspect: "equal" preserves the physical X/Y scale; "auto" fills the subplot
-PLOT_ASPECT = "equal"    #! "equal" or "auto"
+#! ASPECT_XY applies to the XY panels (the 2D run, and row 1 of a 3D run),
+#! ASPECT_ZY to the ZY panels
+ASPECT_XY = 0.5      #! "equal", "auto", or a positive number
+ASPECT_ZY = 1.5      #! "equal", "auto", or a positive number
 
 #! Colourbar limits. None -> percentile from the data.
 BX_VMAX  = 2.0
@@ -96,8 +98,9 @@ BASE, OUTDIR, PLANE2D = args.base, args.outdir, args.plane2d.lower()
 L_OVER = {"x1": args.Lx, "x2": args.Ly, "x3": args.Lz}      #! None = use the file
 L_FLAG = {"x1": "--Lx", "x2": "--Ly", "x3": "--Lz"}         #! for the mismatch message
 
-if PLOT_ASPECT not in ("equal", "auto"):
-    parser.error('PLOT_ASPECT must be either "equal" or "auto"')
+for nm, asp in (("ASPECT_XY", ASPECT_XY), ("ASPECT_ZY", ASPECT_ZY)):
+    if not (asp in ("equal", "auto") or (isinstance(asp, (int, float)) and asp > 0.0)):
+        parser.error(f'{nm} must be "equal", "auto", or a positive number')
 
 for k, v in L_OVER.items():
     if v is not None and v <= 0.0:
@@ -188,8 +191,13 @@ def rho_limits(data):
     vmax = RHO_VMAX if RHO_VMAX is not None else np.percentile(data, PCT)
     return vmin, max(vmax, vmin + 1.0e-30)
 
-def draw(fig, ax, data, title, xlabel, ylabel, extent, cmap, vmin, vmax):
-    im = ax.imshow(data, origin="lower", aspect=PLOT_ASPECT, extent=extent, cmap=cmap, vmin=vmin, vmax=vmax)
+def draw(fig, ax, data, title, xlabel, ylabel, extent, cmap, vmin, vmax, aspect):
+    #! a NUMBER is the box shape the panel should have, so the image fills the box ("auto") and
+    #! set_box_aspect forces height/width; "equal" and "auto" are passed straight to imshow
+    im = ax.imshow(data, origin="lower", aspect="auto" if _is_num(aspect) else aspect,
+                   extent=extent, cmap=cmap, vmin=vmin, vmax=vmax)
+    if _is_num(aspect):
+        ax.set_box_aspect(float(aspect))
     ax.set_title(title, fontsize=14)
     ax.set_xlabel(xlabel, fontsize=12)
     ax.set_ylabel(ylabel, fontsize=12)
@@ -199,18 +207,22 @@ def draw(fig, ax, data, title, xlabel, ylabel, extent, cmap, vmin, vmax):
     cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.03)
     cbar.ax.tick_params(labelsize=11)
 
-def figure_size(row_aspects):
+def _is_num(a):
+    return isinstance(a, (int, float)) and not isinstance(a, bool)
+
+def row_height(aspect, data_ratio):
+    """Height in inches of one row's plot box: data-true for "equal", PANEL for "auto", forced otherwise."""
+    if aspect == "auto":
+        return PANEL
+    r = data_ratio if aspect == "equal" else float(aspect)
+    return min(max(PANEL * r, 1.5), 2.0 * PANEL)     #! clamped so a very flat or tall box stays legible
+
+def figure_size(rows):
     """
-    Figure size in inches for a 3-column grid, one entry per row giving that row's physical Ly/Lx.
-    With PLOT_ASPECT = "equal" a wide box is short, so each row's height follows its own data aspect
-    (clamped so a very flat or very tall box stays legible). With "auto" every panel is PANEL tall.
+    Figure size in inches for a 3-column grid. `rows` is one (aspect, Lvert/Lhoriz) pair per row, so
+    the two rows of a 3D figure are sized separately.
     """
-    width = 3 * (PANEL + PAD_W)
-    if PLOT_ASPECT == "equal":
-        height = sum(min(max(PANEL * a, 1.5), 2.0 * PANEL) + PAD_H for a in row_aspects)
-    else:
-        height = len(row_aspects) * (PANEL + PAD_H)
-    return width, height
+    return 3 * (PANEL + PAD_W), sum(row_height(a, r) + PAD_H for a, r in rows)
 
 LBL_X, LBL_Y, LBL_Z = r"$x\ \omega_p/c$", r"$y\ \omega_p/c$", r"$z\ \omega_p/c$"
 
@@ -253,23 +265,24 @@ for fname in files_local:
         hlabel = LBL_X if PLANE2D == "xy" else LBL_Z
         hx     = "X"   if PLANE2D == "xy" else "Z"
 
-        fig, axs = plt.subplots(1, 3, figsize=figure_size([Ly / Lx]), constrained_layout=True)
-        draw(fig, axs[0], Bx,  rf"$B_x\ ({hx}, Y)$",  hlabel, LBL_Y, ext, "seismic", *sym_limits(Bx, BX_VMAX))
-        draw(fig, axs[1], Jz,  rf"$J_z\ ({hx}, Y)$",  hlabel, LBL_Y, ext, "seismic", *sym_limits(Jz, JZ_VMAX))
-        draw(fig, axs[2], rho, rf"$\rho\ ({hx}, Y)$", hlabel, LBL_Y, ext, "inferno", *rho_limits(rho))
+        fig, axs = plt.subplots(1, 3, figsize=figure_size([(ASPECT_XY, Ly / Lx)]), constrained_layout=True)
+        draw(fig, axs[0], Bx,  rf"$B_x\ ({hx}, Y)$",  hlabel, LBL_Y, ext, "seismic", *sym_limits(Bx, BX_VMAX), ASPECT_XY)
+        draw(fig, axs[1], Jz,  rf"$J_z\ ({hx}, Y)$",  hlabel, LBL_Y, ext, "seismic", *sym_limits(Jz, JZ_VMAX), ASPECT_XY)
+        draw(fig, axs[2], rho, rf"$\rho\ ({hx}, Y)$", hlabel, LBL_Y, ext, "inferno", *rho_limits(rho), ASPECT_XY)
 
     else:
         #! row 1 = XY at mid-Z (horizontal span Lx), row 2 = ZY at mid-X (horizontal span Lz);
         #! both rows share the vertical Y axis
         ext_xy, ext_zy = [0.0, Lx, 0.0, Ly], [0.0, Lz, 0.0, Ly]
 
-        fig, axs = plt.subplots(2, 3, figsize=figure_size([Ly / Lx, Ly / Lz]), constrained_layout=True)
-        draw(fig, axs[0, 0], Bx_xy,  r"$B_x\ (X, Y)$",  LBL_X, LBL_Y, ext_xy, "seismic", *sym_limits(Bx_xy, BX_VMAX))
-        draw(fig, axs[0, 1], Jz_xy,  r"$J_z\ (X, Y)$",  LBL_X, LBL_Y, ext_xy, "seismic", *sym_limits(Jz_xy, JZ_VMAX))
-        draw(fig, axs[0, 2], rho_xy, r"$\rho\ (X, Y)$", LBL_X, LBL_Y, ext_xy, "inferno", *rho_limits(rho_xy))
-        draw(fig, axs[1, 0], Bx_zy,  r"$B_x\ (Z, Y)$",  LBL_Z, LBL_Y, ext_zy, "seismic", *sym_limits(Bx_zy, BX_VMAX))
-        draw(fig, axs[1, 1], Jz_zy,  r"$J_z\ (Z, Y)$",  LBL_Z, LBL_Y, ext_zy, "seismic", *sym_limits(Jz_zy, JZ_VMAX))
-        draw(fig, axs[1, 2], rho_zy, r"$\rho\ (Z, Y)$", LBL_Z, LBL_Y, ext_zy, "inferno", *rho_limits(rho_zy))
+        fig, axs = plt.subplots(2, 3, figsize=figure_size([(ASPECT_XY, Ly / Lx), (ASPECT_ZY, Ly / Lz)]),
+                                constrained_layout=True)
+        draw(fig, axs[0, 0], Bx_xy,  r"$B_x\ (X, Y)$",  LBL_X, LBL_Y, ext_xy, "seismic", *sym_limits(Bx_xy, BX_VMAX), ASPECT_XY)
+        draw(fig, axs[0, 1], Jz_xy,  r"$J_z\ (X, Y)$",  LBL_X, LBL_Y, ext_xy, "seismic", *sym_limits(Jz_xy, JZ_VMAX), ASPECT_XY)
+        draw(fig, axs[0, 2], rho_xy, r"$\rho\ (X, Y)$", LBL_X, LBL_Y, ext_xy, "inferno", *rho_limits(rho_xy), ASPECT_XY)
+        draw(fig, axs[1, 0], Bx_zy,  r"$B_x\ (Z, Y)$",  LBL_Z, LBL_Y, ext_zy, "seismic", *sym_limits(Bx_zy, BX_VMAX), ASPECT_ZY)
+        draw(fig, axs[1, 1], Jz_zy,  r"$J_z\ (Z, Y)$",  LBL_Z, LBL_Y, ext_zy, "seismic", *sym_limits(Jz_zy, JZ_VMAX), ASPECT_ZY)
+        draw(fig, axs[1, 2], rho_zy, r"$\rho\ (Z, Y)$", LBL_Z, LBL_Y, ext_zy, "inferno", *rho_limits(rho_zy), ASPECT_ZY)
 
     fig.suptitle(time_label, fontsize=18)
     outfile = f"{OUTDIR}/B_J_rho_{step_idx:09d}.png"
