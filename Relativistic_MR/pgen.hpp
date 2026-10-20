@@ -33,15 +33,32 @@ namespace user
     //!  B_BG = sqrt(sigma_ion) = (skindepth0/larmor0) / sqrt(mass_ratio)
     //! =====================================================================
 
-    //! sech^2 density profile for one sheet centred at Ly/2
+    //! DKI sheet displacement along Z: Delta_yc(z) = dki_amp * sin(dki_kz * z)
+    //! Shifts the sheet centre in Y as a function of Z, seeding the drift-kink mode.
+    //! Inert unless D == _3D (z unresolved in 2D). Applied IDENTICALLY to the field
+    //! reversal and the particle density so curl(B) = J stays satisfied.
     template <Dimension D>
-    struct HarrisProfile 
+    Inline auto dki_dyc(const coord_t<D>& x_Ph, real_t dki_amp, real_t dki_kz) -> real_t
     {
-        HarrisProfile(real_t cs_width, real_t cs_y) : cs_width { cs_width }, cs_y { cs_y } {}
-        Inline auto operator()(const coord_t<D>& x_Ph) const -> real_t { return ONE / SQR(math::cosh((x_Ph[1] - cs_y) / cs_width));}
+        if constexpr (D == Dim::_3D) { return dki_amp * math::sin(dki_kz * x_Ph[2]); }
+        else                        { (void)x_Ph; (void)dki_amp; (void)dki_kz; return ZERO; }
+    }
+
+    //! sech^2 density profile for one sheet centred at Ly/2 (+ optional DKI kink)
+    template <Dimension D>
+    struct HarrisProfile
+    {
+        HarrisProfile(real_t cs_width, real_t cs_y, real_t dki_amp, real_t dki_kz)
+            : cs_width { cs_width }, cs_y { cs_y }, dki_amp { dki_amp }, dki_kz { dki_kz } {}
+
+        Inline auto operator()(const coord_t<D>& x_Ph) const -> real_t
+        {
+            const real_t yc = cs_y + dki_dyc<D>(x_Ph, dki_amp, dki_kz);      //* kinked sheet centre
+            return ONE / SQR(math::cosh((x_Ph[1] - yc) / cs_width));
+        }
 
     private:
-        const real_t cs_width, cs_y;
+        const real_t cs_width, cs_y, dki_amp, dki_kz;
     };
 
     struct TurbMode {real_t kx, ky, kz, phase, amp; };
@@ -153,11 +170,13 @@ namespace user
         InitFields(real_t bg_B, real_t guide_field, real_t cs_width, real_t cs_y,
                     int plane, array_t<real_t*> kx, array_t<real_t*> ky,
                     array_t<real_t*> kz, array_t<real_t*> ph, array_t<real_t*> am,
-                    std::size_t nmodes, real_t sx, real_t sy, real_t sz): 
-                    bg_B { bg_B }, guide_field { guide_field }, cs_width { cs_width }, 
-                    cs_y { cs_y }, plane { plane }, 
-                    kx { kx }, ky { ky }, kz { kz }, ph { ph }, am { am }, 
-                    nmodes { nmodes }, sx { sx }, sy { sy }, sz { sz } {}
+                    std::size_t nmodes, real_t sx, real_t sy, real_t sz,
+                    real_t dki_amp, real_t dki_kz):
+                    bg_B { bg_B }, guide_field { guide_field }, cs_width { cs_width },
+                    cs_y { cs_y }, plane { plane },
+                    kx { kx }, ky { ky }, kz { kz }, ph { ph }, am { am },
+                    nmodes { nmodes }, sx { sx }, sy { sy }, sz { sz },
+                    dki_amp { dki_amp }, dki_kz { dki_kz } {}
 
         Inline auto turb(const coord_t<D>& x, int comp) const -> real_t 
         {
@@ -188,9 +207,10 @@ namespace user
             return acc;
         }
 
-        Inline auto bx1(const coord_t<D>& x_Ph) const -> real_t 
+        Inline auto bx1(const coord_t<D>& x_Ph) const -> real_t
         {
-            return bg_B * math::tanh((x_Ph[1] - cs_y) / cs_width) + sx * turb(x_Ph, 0);
+            const real_t yc = cs_y + dki_dyc<D>(x_Ph, dki_amp, dki_kz);      //* kinked sheet centre (same as density)
+            return bg_B * math::tanh((x_Ph[1] - yc) / cs_width) + sx * turb(x_Ph, 0);
         }
 
         Inline auto bx2(const coord_t<D>& x_Ph) const -> real_t 
@@ -209,6 +229,7 @@ namespace user
         array_t<real_t*>  kx, ky, kz, ph, am;
         const std::size_t nmodes;
         const real_t      sx, sy, sz;
+        const real_t      dki_amp, dki_kz;
     };
 
     //! =====================================================================
@@ -236,6 +257,14 @@ namespace user
         const long long turb_seed;
         const real_t    turb_amp, spectral_index;
         const int       kmin, kmax, turb_plane;
+
+        //! DKI (drift-kink) seed: sheet displaced in Y as Delta_yc(z)=dki_amp*sin(dki_kz*z).
+        //! Both inputs are LENGTHS in [d0]: dki_amp (Y displacement) and dki_wavelength
+        //! (Z wavelength). Put in the same number => amplitude = wavelength. 3D only.
+        const real_t    dki_amp;
+        const real_t    dki_wavelength;
+        int             dki_mode;       //* DERIVED: nearest integer so lambda divides Lz (Z-periodic)
+        real_t          dki_kz;         //* DERIVED: = 2*pi*dki_mode/Lz
 
         const real_t xmin, xmax, ymin, ymax, zmin, zmax, Lx, Ly, Lz, cs_y;
 
@@ -298,6 +327,19 @@ namespace user
             g.T_bg_i = g.params.template get<real_t>("setup.bg_theta_i", (real_t)0.01);
             g.T_bg_e = g.T_bg_i * g.mass_ratio;
         
+            //* DKI: input wavelength in d0 -> nearest integer mode that divides Lz (keeps Z-periodic),
+            //* then dki_kz = 2*pi*mode/Lz. Actual lambda = Lz/mode may differ slightly from the input.
+            if (g.Lz > ZERO && g.dki_amp > ZERO && g.dki_wavelength > ZERO)
+            {
+                g.dki_mode = std::max(1, (int)std::lround((double)(g.Lz / g.dki_wavelength)));
+                g.dki_kz   = (real_t)(2.0 * M_PI) * (real_t)g.dki_mode / g.Lz;
+            }
+            else
+            {
+                g.dki_mode = 0;
+                g.dki_kz   = ZERO;      //* disabled (amp or wavelength <= 0, or 2D)
+            }
+
             //? Turbulence (unchanged; amplitude is still relative to the in-plane field)
             g.tscale = initial_turbulence(g.Lx, g.Ly, g.Lz, g.turb_plane,
                                         g.turb_amp * g.B_BG, g.kmin, g.kmax,
@@ -326,7 +368,8 @@ namespace user
         
             return InitFields<D> { g.B_BG, g.B_BG * g.guide_field, g.cs_width, g.cs_y,
                                 g.turb_plane, g.kx_d, g.ky_d, g.kz_d, g.ph_d, g.am_d,
-                                nm, g.tscale[0], g.tscale[1], g.tscale[2] };
+                                nm, g.tscale[0], g.tscale[1], g.tscale[2],
+                                g.dki_amp, g.dki_kz };
         }
 
         static auto mass_ratio_from_species(Metadomain<S, M>& m) -> real_t 
@@ -352,6 +395,8 @@ namespace user
         kmax            { p.template get<int>("setup.kmax", 3) },
         turb_plane      { p.template get<int>("setup.turb_plane", 0) },
         spectral_index  { (real_t)std::max(0.0, (double)p.template get<real_t>("setup.spectral_index", (real_t)1.6667)) },
+        dki_amp         { p.template get<real_t>("setup.dki_amp", (real_t)0.0) },
+        dki_wavelength  { p.template get<real_t>("setup.dki_wavelength", (real_t)0.0) },
         xmin            { m.mesh().extent(in::x1).first },
         xmax            { m.mesh().extent(in::x1).second },
         ymin            { m.mesh().extent(in::x2).first },
@@ -541,9 +586,21 @@ namespace user
                 << kv1("Mode band [kmin, kmax]") << "[" << kmin << ", " << kmax << "]\n"
                 << kv1("Plane (0=xy,1=yz,2=zx)") << turb_plane << "\n"
                 << kv1("Spectral index [p]") << spectral_index << "\n"
-                << kv1("Number of modes") << modes_host.size() << "\n\n"
+                << kv1("Number of modes") << modes_host.size() << "\n\n";
 
-                << "===========================================================\n";
+            //! DKI seed (meaningful only in 3D; amplitude or wavelength 0 => disabled)
+            if constexpr (M::Dim == Dim::_3D)
+            {
+                const bool   dki_on     = (dki_mode != 0);
+                const real_t dki_lambda = dki_on ? (Lz / (real_t)dki_mode) : ZERO;
+                oss << "DRIFT-KINK SEED (DKI, along Z)\n"
+                    << kv1("Amplitude [d0]") << dki_amp << (dki_on ? "" : "  (disabled)") << "\n"
+                    << kv1("Wavelength requested [d0]") << dki_wavelength << "\n"
+                    << kv1("Wavelength actual [d0]") << dki_lambda << "  (mode " << dki_mode << " across Lz)\n"
+                    << kv1("Amplitude [half-thickness]") << (cs_width > ZERO ? dki_amp / cs_width : ZERO) << "\n\n";
+            }
+
+            oss << "===========================================================\n";
 
             //* Rank 0 alone prints and writes the file
             if (mpi_rank == 0)
@@ -582,7 +639,7 @@ namespace user
             auto e_cs = arch::energy_dist::Maxwellian<M::Dim, M::CoordType>(local_domain.random_pool(), T_cs_e, { ZERO, ZERO,  drift_u });      //* electron drift + Z
             auto i_cs = arch::energy_dist::Maxwellian<M::Dim, M::CoordType>(local_domain.random_pool(), T_cs_i, { ZERO, ZERO, -drift_u });      //* ion/positron drift - Z
             
-            const auto prof_cs = HarrisProfile<M::Dim>(cs_width, cs_y);
+            const auto prof_cs = HarrisProfile<M::Dim>(cs_width, cs_y, dki_amp, dki_kz);
             arch::InjectNonUniform<S, M, decltype(e_cs), decltype(i_cs), decltype(prof_cs)>(params, local_domain, { 1, 2 }, { e_cs, i_cs }, prof_cs, cs_density);
         }
 
