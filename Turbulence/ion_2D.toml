@@ -1,0 +1,103 @@
+###! Decaying kinetic turbulence for ION-ELECTRON plasma (e-/i+), 2D.
+###! Mass ratio = 25  =>  theta_i = theta_e/25 at equal physical T; sigma_i = sigma_e/25.
+###! Geometry: 2D in SPACE (x1, x2); E, J, B keep all three components.
+###!   Turbulent k lies in the x1-x2 plane  =>  k_parallel = 0 by construction.
+###! ALL boundaries periodic: decaying turbulence, no driving, no inflow.
+###! Lengths in d0 (cold skin depth of the fiducial species = ELECTRONS); c = 1,
+###! so a code time unit equals a light-crossing of 1 d0.
+
+[simulation]
+	name    = "/scratch/project_465003132/DT_ion_2D/DT"
+	engine  = "srpic"
+	runtime = 1000.0
+
+	[simulation.domain]
+		decomposition = [-1, -1]
+
+
+[grid]
+	resolution = [2000, 2000] 
+	extent     = [[0.0, 500.0], [0.0, 500.0]]
+
+	[grid.metric]
+		metric = "minkowski"
+
+	[grid.boundaries]
+		fields    = [["PERIODIC"], ["PERIODIC"]]
+		particles = [["PERIODIC"], ["PERIODIC"]]
+
+
+[scales]
+	skindepth0 = 1.0                      ###* electron skin depth
+	larmor0    = 1.0                      ###* electron Larmor raius; sigma0 = (skindepth0/larmor0)^2
+
+
+[algorithms]
+	current_filters = 4
+
+	[algorithms.timestep]
+		CFL = 0.5
+
+
+[particles]
+	ppc0 = 16.0
+
+	[[particles.species]]                 ###* species 1 = electrons (MUST be the lighter one)
+		label    = "e-"
+		mass     = 1.0
+		charge   = -1.0
+		maxnpart = 1e8
+
+	[[particles.species]]                 ###* species 2 = ions
+		label    = "i+"
+		mass     = 25.0
+		charge   = 1.0
+		maxnpart = 1e8
+
+
+[setup]
+    ###? Plasma
+	bguide            = 1.0               ###* Mean/guide magnetic field (ALWAYS along Z)
+	temperature       = 1.0               ###* FIDUCIAL electron temperature kT/(m_fid c^2)
+
+	###? Turbulent perturbation
+	turb_amp          = 1.0               ###* RMS |dB| in code B units (0.0 => laminar, turb params ignored)
+	turb_seed         = 12345
+	kmin              = 1                 ###* mode-number band, inclusive
+	kmax              = 4
+	turb_kplane       = 0                 ###* 2D: MUST be 0
+	turb_a_axis       = 2                 ###* Vector potential, A = A_3 e_3, along Z
+	spectral_index    = 1.6667            ###* p in E(k) ~ k^-p
+
+
+[output]
+	format   = "BPFile"
+
+	[output.fields]
+		quantities  = ["N", "B", "E", "J"]
+		interval    = 300                 ###* ~25 snapshots over the run
+
+	[output.particles]
+		enable      = false
+
+	[output.spectra]
+		enable      = true
+		e_min       = 1e-6
+		e_max       = 1e6
+		log_bins    = true
+		n_bins      = 1200
+		interval    = 300
+
+	[output.stats]
+		quantities  = ["B^2", "E^2", "ExB", "J.E", "Rho", "T00"]
+		interval    = 100
+
+
+[diagnostics]
+	interval  = 2000
+	log_level = "WARNING"
+
+
+[checkpoint]
+	interval = 5000
+	keep     = 1
