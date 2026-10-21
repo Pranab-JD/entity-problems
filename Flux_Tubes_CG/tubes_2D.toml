@@ -57,7 +57,6 @@
     
     #* Flux Tubes
     kick_velocity          = 0.0          #* v/c --- E x B drift
-    tube_radius            = 64.0         #* Radius of each flux tube (in de; choose it to be Lx/4)
     single_tube            = false        #* False = 2 flux tubes; True = 1 flux tube
 
 
@@ -85,10 +84,10 @@
 
 
 [diagnostics]
-    interval  = 500
+    interval  = 2000
     log_level = "WARNING"
 
 
 [checkpoint]
-    interval = 2000
+    interval = 5000
     keep     = 1

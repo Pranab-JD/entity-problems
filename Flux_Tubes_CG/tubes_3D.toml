@@ -1,33 +1,35 @@
 [simulation]
-    name    = "/scratch/project_465002528/pjd/flux_tubes_CG/L_500_500_500_FF/tubes"
+    name    = "/scratch/project_465002544/pranab/flux_tubes_CG/3D_FF/tubes"
     engine  = "srpic"
-    runtime = 4.0
+    runtime = 128.0
 
     [simulation.domain]
         decomposition = [-1, -1, -1]
 
-###! GRID
+
 [grid]
-    resolution = [500, 500, 500]
-    extent     = [[0.0, 20.0], [-10.0, 10.0], [0.0, 20.0]]
+    resolution = [640, 640, 640]
+    extent     = [[0.0, 128.0], [0.0, 128.0], [0.0, 128.0]]   #* Defined in terms of de
 
     [grid.metric]
         metric = "minkowski"
 
     [grid.boundaries]
-        fields    = [["MATCH", "MATCH"],   ["MATCH", "MATCH"],   ["PERIODIC"]]
-        particles = [["ABSORB", "ABSORB"], ["ABSORB", "ABSORB"], ["PERIODIC"]] 
+        # fields    = [["MATCH", "MATCH"],   ["MATCH", "MATCH"],   ["PERIODIC"]]
+        # particles = [["ABSORB", "ABSORB"], ["ABSORB", "ABSORB"], ["PERIODIC"]] 
+        fields    = [["PERIODIC"], ["PERIODIC"], ["PERIODIC"]]
+        particles = [["PERIODIC"], ["PERIODIC"], ["PERIODIC"]] 
 
-###! ALGORITHMS
+
 [algorithms]
-    current_filters = 8
+    current_filters = 2
 
     [algorithms.timestep]
         CFL = 0.5
 
-###! PARTICLES
+
 [particles]
-    ppc0 = 16.0
+    ppc0 = 32.0
 
     [[particles.species]]
         label    = "e-"
@@ -41,47 +43,51 @@
         charge   = 1.0
         maxnpart = 2e8
 
-###! SCALES
-[scales]
-    larmor0    = 1.0
-    skindepth0 = 1.0
 
-###! SETUP
+[scales]
+    skindepth0 = 1.0                      #* de = skindepth0 = 1.0 code unit for pair plasma
+    larmor0    = 0.5                      #* sigma = (skindepth0/larmor0)**2
+
+
 [setup]
     #* Plasma
-    sigma        = 1.0          # Magnetisation
-    background_T = 0.01         # Background temperature
-    c_param      = 0.0001       # Base guide field
+    background_temperature = 0.05         #* Background temperature (Debye length ~ sqrt(background_temperature))
+    guide_field_floor      = 0.01         #* Base/floor guide field (to avoid numerical instabilities)
+    charge_correction      = true
     
     #* Flux Tubes
-    beta_kick    = 0.0          # v/c --- E x B drift
+    kick_velocity          = 0.0          #* v/c --- E x B drift
+    single_tube            = false        #* False = 2 flux tubes; True = 1 flux tube
 
-    #* Overall system
-    init_rho     = true         # Charge correction (ρ = ∇⋅E) to avoid charge imbalance noise
-    single_tube  = false        # True = 2 flux tubes; False = 1 flux tube
-    smooth_flds  = true         # Smooth fields
-    nsmooth      = 8            # Number of smoothings
 
-###! OUTPUT
 [output]
-    interval = 10
     format   = "BPFile"
 
     [output.fields]
-        quantities = ["N", "B", "E", "J"]
+        quantities  = ["N", "B", "E", "J"]
+        interval    = 50
 
     [output.particles]
-        enable = false
+        enable      = false
 
     [output.spectra]
-        enable = false
+        enable          = true
+        e_min           = 1e-6
+        e_max           = 1e6
+        log_bins        = true
+        num_energy_bins = 1200
+        interval        = 50
+    
+    [output.stats]
+        quantities  = ["B^2", "E^2", "ExB", "J.E", "Rho", "T00"]
+        interval    = 500
 
-###! DIAGNOSTICS
+
 [diagnostics]
-    interval  = 50
+    interval  = 500
     log_level = "WARNING"
 
-###! CHECKPOINT
+
 [checkpoint]
-    interval = 5000
+    interval = 1000
     keep     = 1
