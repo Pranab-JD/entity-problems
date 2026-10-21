@@ -33,15 +33,12 @@ namespace user
     //!  B_BG = sqrt(sigma_ion) = (skindepth0/larmor0) / sqrt(mass_ratio)
     //! =====================================================================
 
-    //! DKI sheet displacement along Z: Delta_yc(z) = dki_amp * sin(dki_kz * z)
-    //! Shifts the sheet centre in Y as a function of Z, seeding the drift-kink mode.
-    //! Inert unless D == _3D (z unresolved in 2D). Applied IDENTICALLY to the field
-    //! reversal and the particle density so curl(B) = J stays satisfied.
+    //! Shifts the sheet centre in Y as a function of Z, seeding the drift-kink mode
     template <Dimension D>
     Inline auto dki_dyc(const coord_t<D>& x_Ph, real_t dki_amp, real_t dki_kz) -> real_t
     {
-        if constexpr (D == Dim::_3D) { return dki_amp * math::sin(dki_kz * x_Ph[2]); }
-        else                        { (void)x_Ph; (void)dki_amp; (void)dki_kz; return ZERO; }
+        if constexpr (D == Dim::_3D) { return dki_amp * math::sin(dki_kz * x_Ph[2]); }          //* Sheet displacement along Z: Delta_yc(z) = dki_amp * sin(dki_kz * z)
+        else                         { (void)x_Ph; (void)dki_amp; (void)dki_kz; return ZERO; }
     }
 
     //! sech^2 density profile for one sheet centred at Ly/2 (+ optional DKI kink)
@@ -451,10 +448,13 @@ namespace user
             const real_t d_e_cold  = skindepth0 * (real_t)std::sqrt(2.0);
             const real_t d_e       = d_e_cold * (real_t)std::sqrt((double)gamma_e_mean);
             const real_t d_i       = skindepth0 * (real_t)std::sqrt(2.0 * (double)(mass_ratio * gamma_i_mean));
-            const real_t rho_e     = larmor0 * gamma_e_mean / B_BG;             //* Larmor ~ 1/B
-            const real_t rho_i     = larmor0 * mass_ratio * gamma_i_mean / B_BG;
+            const real_t rho_e  = larmor0 * math::sqrt(SQR(gamma_e_mean) - ONE) / B_BG;
+            const real_t rho_i  = larmor0 * mass_ratio * math::sqrt(SQR(gamma_i_mean) - ONE) / B_BG;
             const real_t lambda_De = (real_t)std::sqrt((double)T_bg_e) * d_e;
             const real_t lambda_Di = (real_t)std::sqrt((double)T_bg_i) * d_i;
+            const real_t d_tot       = skindepth0 * (real_t)std::sqrt(2.0 / ((double)(ONE / gamma_e_mean) + (double)(ONE / (mass_ratio * gamma_i_mean))));
+            const real_t lambda_Dtot = ONE / (real_t)std::sqrt((double)(ONE / SQR(lambda_De)) + (double)(ONE / SQR(lambda_Di)));
+            const real_t rho_tot     = HALF * (rho_e + rho_i);
 
             //* ---- times ----------------------------------------------------------
             //* code time is in units of skindepth0/c, so converting to electron plasma
@@ -547,6 +547,10 @@ namespace user
                 << kv1("Mean Lorentz factor (" + sp2s + ")") << gamma_i_mean << "\n\n"
 
                 << "CHARACTERISTIC SCALES\n"
+                << "\tPair Plasma\n"
+                << kv2("Skin depth") << d_tot << "  (resolved with " << d_tot / dx << " cells)\n"
+                << kv2("Larmor radius") << rho_tot << "  (resolved with " << rho_tot / dx << " cells)\n"
+                << kv2("Debye length") << lambda_Dtot << "  (resolved with " << lambda_Dtot / dx << " cells)\n\n"
                 << "\tElectrons\n"
                 << kv2("Skin depth") << d_e << "  (resolved with " << d_e / dx << " cells)\n"
                 << kv2("Larmor radius") << rho_e << "  (resolved with " << rho_e / dx << " cells)\n"
