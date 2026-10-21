@@ -8,10 +8,10 @@ Usage:
     input="/scratch/project_465002528/pjd/flux_tubes/tubes/fields/"
     output="/scratch/project_465002528/pjd/flux_tubes/tubes/plots/"
 
-    srun python3 ../postprocessing/Plot_B_E.py "$input" "$output" --Lx 256.0 --r_j 64.0
+    srun python3 ../postprocessing/Plot_J_rho.py "$input" "$output" --Lx 256.0 --r_j 64.0
 
     Required:
-        --Lx    box length along X in code units (sets the t c/L_x normalisation and the x axis)
+        --Lx    box length along X in code units (sets the t c/L_x normalisation AND the x axis)
         --r_j   tube radius in code units        (sets the t c/R   normalisation)
 
     Optional:
@@ -19,12 +19,17 @@ Usage:
 
 2D/3D compatibility
 -------------------
-    Fields from a 2D run have shape (Nx, Ny).
-    Fields from a 3D run have shape (Nx, Ny, Nz).
-    The script detects the dimensionality from the shape of the first field array after reading and
-    slices accordingly:
-      - 2D: use the array directly (no slicing needed).
-      - 3D: take a slice at the mid-plane along the third axis (Nz // 2).
+    Entity writes field arrays with the SLOWEST axis first:
+        2D run : (Ny, Nx)
+        3D run : (Nz, Ny, Nx)        [axis0 = x3, axis1 = x2, axis2 = x1]
+    The dimensionality is taken from the presence of the X3 coordinate array, not from the
+    shape of a field, and a 3D dump is cut at the mid-plane in Z (axis 0).
+
+Force-free diagnostic
+---------------------
+    The sixth panel plots |J x B| / (|J| |B|) = sin(theta), the angle between J and B. This is the
+    correct force-free metric: J x B = 0 (Lorentz force density zero) is the definition of force-free,
+    so this quantity -> 0 in a perfect equilibrium and grows where J is NOT aligned with B.
 
 """
 
@@ -55,8 +60,8 @@ size = comm.Get_size()
 parser = argparse.ArgumentParser()
 parser.add_argument("base",   type=str, help="Directory with fields.NNNNNNNNN.bp files")
 parser.add_argument("outdir", type=str, help="Output directory for PNG plots")
-parser.add_argument("--Lx",   type=float, required=True, help="Box length along X in code units")
-parser.add_argument("--Ly",   type=float, default=None,  help="Box length along Y in code units (default: --Lx)")
+parser.add_argument("--Lx",   type=float, required=True, help="Box length along X in code units; also sets the axis extent and ticks")
+parser.add_argument("--Ly",   type=float, default=None,  help="Box length along Y in code units (default: same as --Lx)")
 parser.add_argument("--r_j",  type=float, required=True, help="Tube radius in code length units")
 
 args   = parser.parse_args()
@@ -92,10 +97,10 @@ if rank == 0:
 files_local = files[rank::size]
 
 def step_from_fname(fname):
-    base_name = os.path.basename(fname)          # fields.000000251.bp
-    stem      = base_name.rsplit(".", 1)[0]      # fields.000000251
+    base_name = os.path.basename(fname)
+    stem      = base_name.rsplit(".", 1)[0]
     try:
-        return int(stem.split(".")[-1])          # 251
+        return int(stem.split(".")[-1])
     except ValueError:
         return -1
 
@@ -111,6 +116,36 @@ def read_time(stream):
     except Exception:
         pass
     return float("nan")
+
+def grid_sizes(stream):
+    """
+    (Nx, Ny, Nz) from the coordinate arrays; Nz is None for a 2D dump. The coordinate
+    arrays are 1D and tiny, so reading them whole costs nothing and settles the
+    dimensionality without touching a field variable.
+    """
+    Nx = np.asarray(stream.read("X1")).size
+    Ny = np.asarray(stream.read("X2")).size
+    try:
+        Nz = np.asarray(stream.read("X3")).size
+    except Exception:
+        Nz = None
+    return Nx, Ny, (Nz if (Nz is not None and Nz > 1) else None)
+
+def read_plane(stream, name, Nx, Ny, Nz, k):
+    """
+    One XY plane as (Ny, Nx): rows = Y, columns = X, which is what imshow expects with
+    origin='lower' and extent=[0, Lx, 0, Ly].
+      2D: the whole (Ny, Nx) array.
+      3D: ONLY the k-th plane, as a hyperslab -- start/count, not a numpy slice.
+    """
+    if Nz is None:
+        a = np.asarray(stream.read(name))
+    else:
+        a = np.asarray(stream.read(name, start=[int(k), 0, 0], count=[1, int(Ny), int(Nx)]))
+    if a.size != int(Nx) * int(Ny):
+        raise ValueError(f"{name}: got {a.size} values, expected {int(Nx) * int(Ny)} "
+                         f"for an {int(Ny)} x {int(Nx)} plane")
+    return a.reshape(int(Ny), int(Nx))
 
 def set_equidistant_ticks(ax, xlo, xhi, ylo, yhi, n=N_TICKS):
     xt = np.linspace(xlo, xhi, n)
@@ -131,29 +166,46 @@ for fname in files_local:
     with Stream(fname, "r") as s:
         next(s.steps())
 
+        x = np.asarray(s.read("X1"))
+        y = np.asarray(s.read("X2"))
+
         t_code = read_time(s)
 
-        Bx = np.asarray(s.read("fB1"))
-        By = np.asarray(s.read("fB2"))
-        Bz = np.asarray(s.read("fB3"))
+        #! ====================================================
+        #! Dimension detection, then ONE plane per field
+        #! ====================================================
+        Nx, Ny, Nz = grid_sizes(s)
+        k_mid = (Nz // 2) if Nz is not None else 0      #! mid-plane in Z (axis 0), 3D only
 
-        Ex = np.asarray(s.read("fE1"))
-        Ey = np.asarray(s.read("fE2"))
-        Ez = np.asarray(s.read("fE3"))
+        Jx  = read_plane(s, "fJ1", Nx, Ny, Nz, k_mid)
+        Jy  = read_plane(s, "fJ2", Nx, Ny, Nz, k_mid)
+        Jz  = read_plane(s, "fJ3", Nx, Ny, Nz, k_mid)
+        rho = read_plane(s, "fN",  Nx, Ny, Nz, k_mid)
 
-    #! ========================================================
-    #! Dimension detection and slicing
-    #! ========================================================
-    ndim = Bx.ndim
-    if ndim == 3:
-        z_half = Bx.shape[2] // 2
-        Bx = Bx[:, :, z_half]; By = By[:, :, z_half]; Bz = Bz[:, :, z_half]
-        Ex = Ex[:, :, z_half]; Ey = Ey[:, :, z_half]; Ez = Ez[:, :, z_half]
-    elif ndim != 2:
-        raise ValueError(f"Unexpected field array rank {ndim} in {fname}")
+        Bx  = read_plane(s, "fB1", Nx, Ny, Nz, k_mid)
+        By  = read_plane(s, "fB2", Nx, Ny, Nz, k_mid)
+        Bz  = read_plane(s, "fB3", Nx, Ny, Nz, k_mid)
 
+    J_mag = np.sqrt(Jx**2 + Jy**2 + Jz**2)
     B_mag = np.sqrt(Bx**2 + By**2 + Bz**2)
-    E_mag = np.sqrt(Ex**2 + Ey**2 + Ez**2)
+
+    #! ========================================================
+    #! Force-free metric: |J x B| / (|J| |B|) = sin(theta)
+    #!   (J x B)_x = Jy*Bz - Jz*By
+    #!   (J x B)_y = Jz*Bx - Jx*Bz
+    #!   (J x B)_z = Jx*By - Jy*Bx
+    #! Force-free  <=>  J x B = 0  <=>  this -> 0.
+    #! ========================================================
+    JxB_x = Jy * Bz - Jz * By
+    JxB_y = Jz * Bx - Jx * Bz
+    JxB_z = Jx * By - Jy * Bx
+    JxB_mag = np.sqrt(JxB_x**2 + JxB_y**2 + JxB_z**2)
+
+    denom = J_mag * B_mag
+    JxB_norm = np.zeros_like(JxB_mag)
+    mask = denom > 0.0
+    JxB_norm[mask] = JxB_mag[mask] / denom[mask]
+    # JxB_norm is sin(theta) in [0, 1]; 0 = force-free.
 
     #! ========================================================
     #! Physical time labels: BOTH are light crossing times (c = 1).
@@ -166,28 +218,45 @@ for fname in files_local:
     #! ========================================================
     #! Plot
     #! ========================================================
-    fig, axs = plt.subplots(2, 4, figsize=(16, 8))
+    fig, axs = plt.subplots(2, 3, figsize=(12, 6))
 
-    # Set to None for automatic percentile-based scaling, or provide explicit (vmin, vmax) tuples to fix limits.
     field_limits = {
-        "Bx":  0.5,  "By":  0.5,  "Bz":  1.0,  "|B|": None,
-        "Ex":  0.05, "Ey":  0.05, "Ez":  0.05, "|E|": 0.05,
+        "Jx":  0.3,
+        "Jy":  0.3,
+        "Jz":  0.6,
+        "|J|": 0.6,
+        "rho": 1.0,
+        # Force-free metric: fix floor at 0 so the map reads as
+        # "distance from force-free" rather than a stretched percentile band.
+        "|JxB|/(|J||B|)": (0.0, 1.0),
     }
 
     cmaps = {
-        "Bx":  "seismic", "By":  "seismic",
-        "Bz":  "inferno", "|B|": "inferno",
-        "Ex":  "seismic", "Ey":  "seismic",
-        "Ez":  "seismic", "|E|": "inferno",
+        "Jx":  "seismic",
+        "Jy":  "seismic",
+        "Jz":  "seismic",
+        "|J|": "inferno",
+        "rho": "inferno",
+        "|JxB|/(|J||B|)": "inferno",
     }
 
     fields = [
-        (Bx, "Bx"), (By, "By"), (Bz, "Bz"), (B_mag, "|B|"),
-        (Ex, "Ex"), (Ey, "Ey"), (Ez, "Ez"), (E_mag, "|E|"),
+        (Jx,       "Jx"),
+        (Jy,       "Jy"),
+        (Jz,       "Jz"),
+        (J_mag,    "|J|"),
+        (rho,      "rho"),
+        (JxB_norm, "|JxB|/(|J||B|)"),
     ]
 
     x_lo, x_hi = 0.0, Lx
     y_lo, y_hi = 0.0, Ly
+
+    #! sanity check: the file should agree with --Lx/--Ly to within about one cell
+    if rank == 0 and fname == files_local[0]:
+        dx_est, dy_est = (x.max() - x.min()) / max(x.size - 1, 1), (y.max() - y.min()) / max(y.size - 1, 1)
+        if abs(x.max() - x.min() + dx_est - Lx) > 2.0 * dx_est or abs(y.max() - y.min() + dy_est - Ly) > 2.0 * dy_est:
+            print(f"  [warn] file extent is x:[{x.min():g},{x.max():g}] y:[{y.min():g},{y.max():g}] but --Lx={Lx:g} --Ly={Ly:g}", flush=True)
 
     for ax, (data, label) in zip(axs.flat, fields):
 
@@ -227,7 +296,7 @@ for fname in files_local:
     fig.suptitle(time_label, fontsize=16, y=1.00)
     fig.tight_layout()
 
-    outfile = f"{outdir}/fields_{step_idx:09d}.png"
+    outfile = f"{outdir}/moments_2D_{step_idx:09d}.png"
     fig.savefig(outfile, dpi=150)
     plt.close(fig)
 
