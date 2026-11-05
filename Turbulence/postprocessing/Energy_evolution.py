@@ -3,76 +3,43 @@ Created on Thu Sep 10 2026
 
 @author: Pranab JD, Claude AI
 
-Plot magnetic-component and kinetic energy histories from Entity's *_stats.csv
-for the relativistic Harris-sheet run. All four panels are normalised to the
-INITIAL in-plane magnetic energy B_x^2(t=0)
+Plot magnetic and kinetic energy histories from entity's *_stats.csv
+All four panels are normalised to the INITIAL in-plane magnetic energy B_x^2(t=0)
 
 Usage
 -----
-    csv="/scratch/project_465002528/pjd/RMR_ie_2D/RMR_stats.csv"
-    out="/scratch/project_465002528/pjd/RMR_ie_2D/plots"
+    sfolder="/scratch/project_465003132/RMR_pair_3D/sigma_10_Z100/"
+    folder="/scratch/project_465003132/RMR_pair_3D/sigma_10_Z100/RMR/"
+    output="${folder}/plots"
 
-    python3 -u Energy_history.py "$csv" "$out"
-    python3 -u Energy_history.py "$csv" "$out" --list_cols   # show CSV headers
+    Lx=200.0; larmor=0.3162
 
-    Optional:
-        --fields  directory with fields.*.bp files used to get L_x
-                  (default: strip "_stats.csv" from the CSV path to recover
-                   <simulation.name>, then use <simulation.name>/fields)
-        --Lx      box length along X in code units; overrides --fields
+    srun -N 1 -n 1 python3 -u ../postprocessing/Energy_evolution.py "${sfolder}RMR_stats.csv" "$output" \
+    --Lx "$Lx" --larmor0 "$larmor"
+
 """
 
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")
-import argparse, os, glob
+import argparse, os
 import matplotlib.pyplot as plt
-
-#! ============================================================
-#! USER SETTINGS
-#! ============================================================
-#! L_x definition:
-#!   False -> X1.max() - X1.min()   (cell centres; identical to Plot_Bx_Jz_rho.py)
-#!   True  -> X1e.max() - X1e.min() (cell edges; exact box length)
-USE_CELL_EDGES = False
 
 #! ============================================================
 #! Args
 #! ============================================================
 parser = argparse.ArgumentParser()
-parser.add_argument("csv",    type=str, help="Path to the *_stats.csv file")
-parser.add_argument("outdir", type=str, help="Output directory for the PNG")
-parser.add_argument("--fields", type=str, default=None,
-                    help="Directory with fields.*.bp files for L_x "
-                         "(default: <directory of the CSV>/fields)")
-parser.add_argument("--Lx", type=float, default=None,
-                    help="Box length along X (code units); overrides --fields")
-parser.add_argument("--list_cols", action="store_true",
-                    help="Print the CSV column names and exit")
+parser.add_argument("csv",          type=str)
+parser.add_argument("outdir",       type=str)
+parser.add_argument("--Lx",         type=float, required=True)
+parser.add_argument("--larmor0",    type=float, default=None)
+parser.add_argument("--skindepth0", type=float, default=1.0)
+
 args = parser.parse_args()
 
 CSV    = args.csv
 OUTDIR = args.outdir
 TCOL   = "time"   #! time column name
-
-#! ------------------------------------------------------------
-#! Default fields dir: recover the run directory from the CSV name.
-#!   Entity writes stats to  <simulation.name>_stats.csv  and field
-#!   output to  <simulation.name>/fields/  (see metadomain_stats.cpp).
-#!   So stripping the "_stats.csv" suffix from the CSV path gives back
-#!   <simulation.name>, i.e. the run directory that holds fields/.
-#!   e.g.  .../RMR_stats.csv        -> .../RMR/fields
-#!         .../RMR/_stats.csv       -> .../RMR/fields   (trailing-slash name)
-#!   Fallback (CSV not named *_stats.csv): fields/ next to the CSV.
-#! ------------------------------------------------------------
-def default_fields_dir(csv_path):
-    p = os.path.abspath(csv_path)
-    if p.endswith("_stats.csv"):
-        simname = p[: -len("_stats.csv")]          #! = simulation.name
-        return os.path.join(simname, "fields")
-    return os.path.join(os.path.dirname(p), "fields")
-
-FIELDS_DIR = args.fields if args.fields is not None else default_fields_dir(CSV)
 
 os.makedirs(OUTDIR, exist_ok=True)
 
@@ -83,12 +50,6 @@ with open(CSV, "r") as f:
     header_line = f.readline()
 colnames = [c.strip() for c in header_line.strip().split(",")]
 colnames = [c for c in colnames if c != ""]
-
-if args.list_cols:
-    print(f"\nColumns in {os.path.basename(CSV)}:")
-    for c in colnames:
-        print("   ", c)
-    raise SystemExit(0)
 
 data = np.genfromtxt(CSV, delimiter=",", skip_header=1)
 if data.ndim == 1:
@@ -108,7 +69,7 @@ def find(*candidates):
     raise SystemExit(
         f"None of {candidates} found in CSV.\n"
         f"  Available: {list(col.keys())}\n"
-        f"  Run with --list_cols and edit the candidate names below.")
+        f"  Edit the candidate names below.")
 
 t    = find(TCOL, "Time", "t")
 B1sq = find("B1^2", "Bx^2", "B_1^2", "B1_2")
@@ -118,30 +79,12 @@ T00  = find("T00", "T_00", "Ttt")
 Rho  = find("Rho", "rho", "N")
 
 #! ============================================================
-#! L_x: box length along X, same definition as Plot_Bx_Jz_rho.py
-#!   priority: --Lx  >  X1 (or X1e) from the first fields.*.bp file
+#! L_x: box length along X, in code units
 #! ============================================================
-def get_Lx():
-    if args.Lx is not None:
-        return float(args.Lx), "--Lx (command line)"
-
-    ffiles = sorted(glob.glob(f"{FIELDS_DIR}/fields.*.bp"))
-    if len(ffiles) == 0:
-        raise SystemExit(
-            f"Cannot determine L_x: no fields.*.bp in {FIELDS_DIR}\n"
-            f"  - pass --fields <dir> or --Lx <value>")
-
-    from adios2 import Stream              #! imported only when needed
-    var = "X1e" if USE_CELL_EDGES else "X1"
-    with Stream(ffiles[0], "r") as s:
-        next(s.steps())
-        x = np.asarray(s.read(var))        #! global X coordinates (1D)
-    return float(x.max() - x.min()), f"{var} in {os.path.basename(ffiles[0])}"
-
-LX, LX_SRC = get_Lx()
+LX = float(args.Lx)
 if not (LX > 0):
-    raise SystemExit(f"Invalid L_x = {LX} (from {LX_SRC})")
-print(f"L_x = {LX:.6g}  (from {LX_SRC})", flush=True)
+    raise SystemExit(f"Invalid L_x = {LX}")
+print(f"L_x = {LX:.6g}", flush=True)
 
 t_lc = t / LX                              #! light-crossing times of L_x (c = 1)
 
@@ -160,7 +103,8 @@ if norm0 == 0 or not np.isfinite(norm0):
 E_Bx_f = E_Bx / norm0
 E_By_f = E_By / norm0
 E_Bz_f = E_Bz / norm0
-KE_f   = KE   / norm0
+sigma0 = (args.skindepth0 / args.larmor0) ** 2
+KE_f   = KE / (sigma0 * norm0)
 
 #! ============================================================
 #! Plot 2x2
