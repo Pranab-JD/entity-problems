@@ -19,8 +19,6 @@ Usage:
                     rejected for a 2D run
 
     Optional:
-        --b0        mean guide field along z, i.e. setup.bguide. If non-zero it is
-                    SUBTRACTED from the Bz panel so that dBz is plotted (default: 0)
         --t-eddy    outer-scale eddy turnover time in code units; copy the value
                     "Eddy turnover time [1/w_p1]" printed by the pgen. If given, the
                     title also reports t / t_eddy, the natural clock for decay
@@ -30,19 +28,12 @@ Usage:
                     you want for a movie of a DECAYING run (an amplitude that halves
                     must look halved, not get renormalised away)
 
-    Bx and By share one colour scale, as do Ex and Ey, so that in-plane anisotropy is
-    visible by eye. Bz, |B|, Ez and |E| each keep their own.
-
 2D/3D compatibility
 -------------------
     Entity writes field arrays with the SLOWEST axis first:
         2D run : (Ny, Nx)
         3D run : (Nz, Ny, Nx)        [axis0 = z, axis1 = y, axis2 = x]
-    The dimensionality is taken from the presence of the X3 coordinate array, not from
-    the shape of a field, and a 3D dump is cut at the mid-plane in z (axis 0).
-
-    Variable names in the .bp files are unchanged (X1/X2/X3, fB1/fB2/fB3, fE1/fE2/fE3);
-    only the axis and panel labels are written as x, y, z.
+        
 """
 
 import numpy as np
@@ -76,7 +67,6 @@ parser.add_argument("outdir",      type=str,   help="Output directory for PNG pl
 parser.add_argument("--Lx",        type=float, required=True, help="Box length along x in code units")
 parser.add_argument("--Ly",        type=float, required=True, help="Box length along y in code units")
 parser.add_argument("--Lz",        type=float, default=None,  help="Box length along z in code units (required for 3D runs)")
-parser.add_argument("--b0",        type=float, default=0.0,   help="Mean field along z (setup.bguide); subtracted from the Bz panel")
 parser.add_argument("--t-eddy",    type=float, default=None,  dest="t_eddy", help="Outer eddy turnover time [1/w_p1] from the pgen printout")
 parser.add_argument("--pct",       type=float, default=99.5,  help="Percentile for colour limits")
 parser.add_argument("--per-frame", action="store_true", dest="per_frame", help="Rescale colours per snapshot instead of using one fixed scale")
@@ -87,7 +77,6 @@ outdir    = args.outdir
 Lx        = args.Lx
 Ly        = args.Ly
 Lz        = args.Lz
-b0        = args.b0
 t_eddy    = args.t_eddy
 pct       = args.pct
 per_frame = args.per_frame
@@ -114,12 +103,10 @@ comm.Barrier()
 #!   kind  = "seq" : sequential, limits [0, vmax]        (magnitudes)
 #!   group : panels sharing a group share one colour scale
 #! ============================================================
-BZ_LABEL = r"$\delta B_z$" if b0 != 0.0 else r"$B_z$"
-
 PANELS = [
     (r"$B_x$",   "div", "seismic", "B_inplane"),
     (r"$B_y$",   "div", "seismic", "B_inplane"),
-    (BZ_LABEL,   "div", "seismic", "B_z"),
+    (r"$B_z$",   "seq", "plasma",  "B_z"),
     (r"$|B|$",   "seq", "inferno", "B_mag"),
     (r"$E_x$",   "div", "seismic", "E_inplane"),
     (r"$E_y$",   "div", "seismic", "E_inplane"),
@@ -204,7 +191,6 @@ if rank == 0:
     if is_3d:
         print(f"    Box length L_z [d_e] = {Lz}", flush=True)
         print(f"    Cut plane           = z = {0.5 * Lz:g} (k = {Nz_global // 2} of {Nz_global})", flush=True)
-    print(f"    Mean field B_z [B0] = {b0}" + ("  (subtracted from the Bz panel)" if b0 != 0.0 else ""), flush=True)
     if t_eddy is not None:
         print(f"    Eddy turnover  [1/w_p] = {t_eddy}", flush=True)
     print(f"    Colour scale        = {'per frame' if per_frame else 'fixed across all frames'}", flush=True)
@@ -271,13 +257,13 @@ def load_panels(fname):
     #! |B| uses the FULL field including the guide field; only the Bz panel shows the
     #! fluctuation. Mixing the two in one figure is deliberate: |B| tells you about
     #! compressibility, dBz about the fluctuation structure.
-    B_mag = np.sqrt(Bx**2 + By**2 + Bz**2) if have_B else None
+    B_mag = np.sqrt(Bx**2 + By**2) if have_B else None
     E_mag = np.sqrt(Ex**2 + Ey**2 + Ez**2) if have_E else None
 
     panels = {
         r"$B_x$":  Bx,
         r"$B_y$":  By,
-        BZ_LABEL:  (Bz - b0) if Bz is not None else None,
+        r"$B_z$":  Bz,
         r"$|B|$":  B_mag,
         r"$E_x$":  Ex,
         r"$E_y$":  Ey,
