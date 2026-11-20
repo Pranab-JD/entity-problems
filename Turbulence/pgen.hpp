@@ -37,22 +37,22 @@
 //! =============================================================================
 //!  PROBLEM DESCRIPTION
 //!
-//!  Decaying turbulence in a uniform, collisionless two-species plasma (electron-positron
-//!  or electron-ion), relativistic or non-relativistic, in 2D or 3D. Entity SRPIC engine,
-//!  Minkowski metric, MPI build required. Code units: lengths in d0, fields in B0.
+//!  Decaying turbulence in a uniform, collisionless two-species plasma 
+//!  (electron-positron or electron-ion), relativistic or non-relativistic, in 2D or 3D
 //!
-//!  BOUNDARIES: periodic in every direction. Set them in the TOML; the pgen does not check.
+//!  BOUNDARIES: periodic in every direction
 //!
 //!  INITIAL STATE (t = 0)
 //!   - Magnetic field: B = B_guide z + B_perturbed. B_perturbed is a sum of solenoidal
-//!     Fourier modes with mode numbers kmin <= |n| <= kmax (k = 2 pi n / L), spectrum
-//!     E(k) ~ k^-p, random phases and an exact RMS. The amplitudes use the Yee-matched
+//!     Fourier modes with mode numbers kmin <= |n| <= kmax (k = 2 pi n / L), shell spectrum
+//!     E(k) ~ k^spectral_slope, random phases and an exact RMS. The amplitudes use the Yee-matched
 //!     wavenumber k~, so div(B) = 0 on the grid.
 //!   - Flow: u_perturbed, built the same way with independent phases (v_seed). Its RMS
 //!     follows the relativistic Alfven relation (B_perturbed_rms / B_rms) vA, scaled by
 //!     s <= 1 so that each species stays below u_total_cap.
 //!   - Particles: uniform density n_s = n0/2 per species, Maxwell-Juttner at T_s, drifting
-//!     at u_perturbed + u_drift_species. The drifts carry the current J (see
+//!     at u_perturbed + u_drift_species. The thermal spread is an exact Maxwell-Juttner sample at
+//!     every temperature (TurbCurrentDist::thermal_sample), and <gamma_s> is computed exactly. The drifts carry the current J (see
 //!     InitFields::loaded_current), shared between the species by enthalpy at zero net
 //!     momentum.
 //!   - Electric field: E = -(u_motional x B), where u_motional is the field-line velocity
@@ -63,35 +63,25 @@
 //!   - Startup printout, also written to <simulation.name>/Simulation_params.txt: scales,
 //!     spectrum, speeds, current, consistency checks and a Gauss-law check of the charge.
 //!
-//!  INPUTS  (setup.*, default in brackets)
-//!   B_guide [1.0]                    guide field along Z [B0]
-//!   B_perturbed_rms [1.0]            RMS |B_perturbed| [B0]
-//!   kmin [1], kmax [4]               mode-number band, k = 2 pi n / L
-//!   spectral_index [5/3]             p in E(k) ~ k^-p
-//!   B_seed [12345], v_seed [67890]   phase seeds of B_perturbed and u_perturbed; must differ
-//!   turb_kplane [-1 in 3D, 0 in 2D]  k-space: -1 = 3D, 0 = X-Y, 1 = Y-Z, 2 = Z-X
-//!   turb_a_axis [-1]                 vector potential: -1 = random _|_ k, 0/1/2 = X/Y/Z
-//!                                    (2 in 2D gives B_perturbed in the X-Y plane)
-//!   turb_rand_amp [true]             Gaussian random mode amplitudes
-//!   temperature [0.01]               species-1 temperature kT_1 / (m0 c^2)
-//!   temperature_ratio [1.0]          T_2 / T_1
-//!   perturb_velocity [true]          load u_perturbed
-//!   u_total_cap [0.7]                cap on each species' total speed [c], in (0, 0.99)
-//!  Also read: scales.larmor0 and scales.skindepth0 (sigma0 = (skindepth0/larmor0)^2);
-//!  species 1 = electrons, species 2 = positrons or ions (mass and charge from the TOML).
-//! =============================================================================
-
-//! =============================================================================
-//!  LIMITATIONS
+//!  INPUTS
+//!     B_guide                         Guide field along Z [B0]
+//!     B_perturbed_rms                 RMS |B_perturbed| [B0]
+//!     kmin, kmax                      mode-number band, k = 2 pi n / L
+//!     spectral_slope                  slope of the shell spectrum E(k) ~ k^spectral_slope
+//!                                     0 = flat, -5/3 = Kolmogorov
+//!     B_seed, v_seed                  Phase seeds of B_perturbed and u_perturbed; must differ
+//!     turb_kplane                     k-space: -1 = 3D, 0 = X-Y, 1 = Y-Z, 2 = Z-X
+//!     turb_a_axis                     vector potential: -1 = random _|_ k, 0/1/2 = X/Y/Z
+//!                                     (2 in 2D gives B_perturbed in the X-Y plane)
+//!     turb_rand_amp                   Gaussian random mode amplitudes
+//!     temperature                     Species-1 temperature kT_1 / (m0 c^2)
+//!     temperature_ratio               T_2 / T_1
+//!     perturb_velocity                Load u_perturbed
+//!     u_total_cap                     Cap on each species' total speed [c], in (0, 0.99)
 //!
-//!  GENERAL
-//!   - Two species: |q| = 1, opposite signs, equal densities (hydrogen or pair).
-//!     The printout labels species 1 as the electron.
-//!   - Decaying turbulence only. The flow starts at the Alfven value (kinetic = magnetic
-//!     fluctuation energy), or s^2 of it when the u_total cap acts.
-//!   - setup.B_guide defaults to 1.0: a missing or misspelt key silently adds a guide field.
-//!   - Tested: 2D, CPU, MPI (1 and 4 ranks), short runs. Untested: 3D, GPU, long runs.
-//!   - Host setup cost ~ kmax^4 in 2D, repeated on every rank (slow beyond kmax ~ 32).
+//! =============================================================================
+//!
+//!  LIMITATIONS
 //!
 //!  NON-RELATIVISTIC  (sigma_h < 0.1; for ion-electron also vA_e = sqrt(m_i/m_e) vA << c)
 //!   - Particle noise: the current drift and the polarisation charge are small against
@@ -109,12 +99,14 @@
 //!   - NOT loaded, both needing E != 0 -- in a pair plasma only when u_perturbed is loaded
 //!     (or T_1 != T_2), in an ion-electron plasma always (Hall field):
 //!       * the parallel displacement current that keeps E.B = 0 as field lines rotate,
-//!         J_par -> J_par - AMP E.(curl E)/|B|; relative size ~ (u/c)^2, about 10% of J
-//!         at sigma_h >= 10 with B_perturbed/B ~ 0.4;
-//!       * the advective part of dE_perp/dt, (u.grad)u x B - u x curl(u x B); relative
-//!         size ~ sigma_h/(1 + sigma_h)^2 B_perturbed/B (largest, ~10%, at sigma_h ~ 1).
+//!         J_par -> J_par - AMP E.(curl E)/|B|; it grows as (u/c)^2;
+//!       * the advective part of dE_perp/dt, (u.grad)u x B - u x curl(u x B); it grows with vA/c.
+//!     Measured with print_setup for B_perturbed/B ~ 0.4 (RMS fraction of AMP curl(B), advective / parallel):
+//!     ion-electron at sigma_h = 0.02: 1.1% / 0.35%; pair at sigma_h = 1.1: 12-17% / 6-8% (kmax = 2-4);
+//!     pair at sigma_h = 11: 21% / 10%.
 //!     Both scale with s^2 when the u_total cap acts. Expect an initial transient of these
-//!     sizes and measure it before trusting early times.
+//!     sizes and measure it before trusting early times. print_setup estimates both from the
+//!     loaded fields (UNLOADED DISPLACEMENT CURRENT AT t = 0).
 //!   - The u_total cap uses the first-order current; print_setup reports the peak speed with
 //!     the convection term and warns if it exceeds the cap.
 //!   - Current starvation: the field-aligned current is carried in full, so a high sigma0
@@ -161,8 +153,8 @@ namespace user
     //* A_m = a_k e_A sin(k.x + ph)  =>  b_m cos(k.x + ph) with b_m = a_k (k x e_A):
     //* divergence-free by construction, with |b_m| = a_k |k| since e_A _|_ k.
     //*
-    //* a_k ~ (k/k0)^(-(p+dim+1)/2): with N(k)dk ~ k^(dim-1)dk modes per shell this
-    //* yields E(k) ~ k^(dim-1)|b_k|^2 ~ k^-p. dim=2 -> -(p+3)/2, dim=3 -> -(p+4)/2
+    //* a_k ~ (k/k0)^((spectral_slope - dim - 1)/2): with N(k)dk ~ k^(dim-1)dk modes per shell this
+    //* yields E(k) ~ k^(dim-1)|b_k|^2 ~ k^spectral_slope. dim = 2 -> (spectral_slope - 3)/2, dim = 3 -> (spectral_slope - 4)/2
 
     //* Yee-matched wavenumber k~ = (2/h) sin(k h/2): the one-cell centred difference of cos(k x) is exactly -k~ sin(k x); h = 0 -> continuum k
     inline auto yee_wavenumber(double k, double h) -> double
@@ -176,14 +168,14 @@ namespace user
                                 real_t                 Ly,
                                 real_t                 Lz,
                                 bool                   is_3d,
-                                real_t                 rms_target,    //* total RMS of the mode sum
+                                real_t                 rms_target,      //* total RMS of the mode sum
                                 int                    kmin,
                                 int                    kmax,
                                 long long              seed,
-                                real_t                 spectral_index,
-                                int                    kplane,        //* -1 = full 3D, 0 = x1x2, 1 = x2x3, 2 = x3x1
-                                int                    a_axis,        //* -1 = random e_A _|_ k, else 0/1/2 = fixed axis
-                                bool                   random_amp,    //* Gaussian mode amplitudes
+                                real_t                 spectral_slope,  //* E(k) ~ k^spectral_slope (shell spectrum)
+                                int                    kplane,          //* -1 = full 3D, 0 = x1x2, 1 = x2x3, 2 = x3x1
+                                int                    a_axis,          //* -1 = random e_A _|_ k, else 0/1/2 = fixed axis
+                                bool                   random_amp,      //* Gaussian mode amplitudes
                                 const std::array<double, 3>& cell_size, //* Yee cell (dx, dy, dz) for k~, or zeros for continuum k
                                 std::vector<TurbMode>& modes_out) -> std::array<real_t, 3>
     {
@@ -218,17 +210,18 @@ namespace user
         //! dim is the dimensionality of K-SPACE, not of the simulation
         const double dim = (double)kspace_dim(kplane, is_3d);
 
-        //~ E(k) ~ k^-p with p = spectral_index, and since |b_m| = a_k |k| the
-        //~ per-mode amplitude goes as k^(1 - (p+dim+1)/2). Two values worth knowing:
+        //~ E(k) ~ k^spectral_slope: the energy summed over a |k| shell, i.e. the slope read off a
+        //~ power-spectrum plot. A shell holds ~ k^(dim-1) modes and |b_m| = a_k |k|, so the energy of
+        //~ ONE mode goes as k^(spectral_slope - (dim-1)). Two values worth knowing:
         //~
-        //~   p = 0       -> E(k) = const: equal energy in each |k| SHELL. The number
-        //~                  of modes per shell grows as k^(dim-1), so individual
-        //~                  modes still get weaker with k.
-        //~   p = 1 - dim -> weight_exp = -1 exactly, a_k ~ 1/k, |b_m| = const:
-        //~                  equal energy in every MODE. That is -1 in 2D and -2 in
-        //~                  3D, and it is what iPIC3D's AlfvTurb2D does (slope = 0).
-        //~                  NB dim is the K-SPACE dimension, so turb_kplane moves it.
-        const double weight_exp = -0.5 * ((double)spectral_index + dim + 1.0);
+        //~   spectral_slope = 0       -> E(k) = const: equal energy in each |k| SHELL. The number
+        //~                               of modes per shell grows as k^(dim-1), so individual
+        //~                               modes still get weaker with k.
+        //~   spectral_slope = dim - 1 -> weight_exp = -1 exactly, a_k ~ 1/k, |b_m| = const:
+        //~                               equal energy in every MODE. That is +1 in 2D and +2 in
+        //~                               3D, and it is what iPIC3D's AlfvTurb2D does.
+        //~                               NB dim is the K-SPACE dimension, so turb_kplane moves it.
+        const double weight_exp = 0.5 * ((double)spectral_slope - dim - 1.0);
 
         const int nx_range = vary_x ? kmax : 0;
         const int ny_range = vary_y ? kmax : 0;
@@ -457,7 +450,7 @@ namespace user
     //~
     //~  The mean flow is zero (plasma rest frame, no k = 0 mode), so u_perturbed is
     //~  the whole velocity the two species share. Same solenoidal construction as
-    //~  B_perturbed (u_m = c_k (k x e_A), same band, same spectral index, same
+    //~  B_perturbed (u_m = c_k (k x e_A), same band, same spectral slope, same
     //~  polarisation axis) but from an INDEPENDENT phase set seeded by
     //~  setup.v_seed. s <= 1 is the u_total cap factor (make_init); it
     //~  scales every mode alike, so u_perturbed stays solenoidal.
@@ -831,8 +824,70 @@ namespace user
 
         TurbCurrentDist(random_number_pool_t& pool, real_t theta_s, real_t u_drift_coeff,
                         const InitFields<M::Dim>& flds, const TurbVelocity<M::Dim>& vel):
-                        maxwellian { pool, theta_s }, pool { pool }, u_drift_coeff { u_drift_coeff },
+                        maxwellian { pool, theta_s }, pool { pool }, theta { theta_s }, u_drift_coeff { u_drift_coeff },
                         flds { flds }, vel { vel } {}
+
+        //? ISOTROPIC Maxwell-Juttner four-velocity at temperature theta = kT_s/(m_s c^2), in the rest frame.
+        //? theta >= 0.5: Entity's Maxwellian, which uses the exact Sobol method there.
+        //? theta <  0.5: Entity's Maxwellian draws a non-relativistic Gaussian four-velocity, which loads
+        //?   <gamma> - 1 at 0.98, 0.93, 0.81, 0.62 of the Maxwell-Juttner value at theta = 0.01, 0.03, 0.1, 0.3,
+        //?   so the energy eps = gamma - 1 is sampled exactly here instead. Its distribution is
+        //?       f(eps) ~ sqrt(eps) (1 + eps) sqrt(1 + eps/2) exp(-eps/theta),
+        //?   and since sqrt(1 + x) <= 1 + x/2 it is bounded by the envelope sqrt(eps) (1 + eps)(1 + eps/4) exp(-eps/theta):
+        //?   a mixture of Gamma distributions of shape 3/2, 5/2, 7/2 and scale theta, with weights 1 : 15 theta/8 : 15 theta^2/16.
+        //?   Gamma(k + 1/2) = (sum of k unit exponentials) + Z^2/2 with Z normal. A candidate is accepted with
+        //?   probability f/envelope = sqrt(1 + eps/2) / (1 + eps/4); the acceptance rate is above 0.97 for theta < 0.5.
+        //?   The direction is isotropic and |u| = sqrt(eps (eps + 2)).
+        Inline void thermal_sample(const coord_t<D>& x_Ph, vec_t<Dim::_3D>& v) const
+        {
+            if (theta >= HALF) { maxwellian(x_Ph, v); return; }
+
+            auto rand_gen = pool.get_state();
+
+            //* mixture weights of the envelope: Gamma shape 3/2, 5/2, 7/2
+            const real_t weight_shape_3_2 = ONE;
+            const real_t weight_shape_5_2 = static_cast<real_t>(15.0 / 8.0) * theta;
+            const real_t weight_shape_7_2 = static_cast<real_t>(15.0 / 16.0) * SQR(theta);
+            const real_t weight_total     = weight_shape_3_2 + weight_shape_5_2 + weight_shape_7_2;
+
+            real_t energy   = ZERO;   //* eps = gamma - 1
+            bool   accepted = false;
+            while (!accepted)
+            {
+                //* choose the component: number of unit exponentials beyond the first (0, 1 or 2)
+                const real_t pick          = Random<real_t>(rand_gen) * weight_total;
+                const int    extra_shapes  = (pick < weight_shape_3_2) ? 0 : ((pick < weight_shape_3_2 + weight_shape_5_2) ? 1 : 2);
+
+                //* Gamma(3/2 + extra_shapes) = (1 + extra_shapes) unit exponentials + Z^2/2,  Z^2/2 = -ln(U) cos^2(2 pi U') (Box-Muller)
+                real_t gamma_variate = ZERO;
+                for (int i = 0; i <= extra_shapes; ++i)
+                {
+                    real_t uniform = Random<real_t>(rand_gen);
+                    while (!(uniform > ZERO)) { uniform = Random<real_t>(rand_gen); }
+                    gamma_variate -= math::log(uniform);
+                }
+                real_t uniform = Random<real_t>(rand_gen);
+                while (!(uniform > ZERO)) { uniform = Random<real_t>(rand_gen); }
+                const real_t box_muller_cos = math::cos(static_cast<real_t>(constant::TWO_PI) * Random<real_t>(rand_gen));
+                gamma_variate -= math::log(uniform) * SQR(box_muller_cos);
+
+                //* accept with probability sqrt(1 + eps/2) / (1 + eps/4)
+                energy   = theta * gamma_variate;
+                accepted = (Random<real_t>(rand_gen) * (ONE + static_cast<real_t>(0.25) * energy) < math::sqrt(ONE + HALF * energy));
+            }
+
+            //* isotropic direction, |u| = sqrt(eps (eps + 2))
+            const real_t four_velocity_magnitude = math::sqrt(energy * (energy + TWO));
+            const real_t cos_polar               = TWO * Random<real_t>(rand_gen) - ONE;
+            const real_t sin_polar_sq            = ONE - SQR(cos_polar);
+            const real_t sin_polar               = (sin_polar_sq > ZERO) ? math::sqrt(sin_polar_sq) : ZERO;
+            const real_t azimuth                 = static_cast<real_t>(constant::TWO_PI) * Random<real_t>(rand_gen);
+            v[0] = four_velocity_magnitude * sin_polar * math::cos(azimuth);
+            v[1] = four_velocity_magnitude * sin_polar * math::sin(azimuth);
+            v[2] = four_velocity_magnitude * cos_polar;
+
+            pool.free_state(rand_gen);
+        }
 
         //? Turn an ISOTROPIC Juttner sample into one drifting at u_total_species (lab
         //? frame) by the flipping method of Zenitani (2015), arXiv:1504.03910 -- the
@@ -888,8 +943,8 @@ namespace user
 
         Inline void operator()(const coord_t<D>& x_Ph, vec_t<Dim::_3D>& v) const
         {
-            //* 1. isotropic thermal four-velocity at theta_s
-            maxwellian(x_Ph, v);
+            //* 1. isotropic thermal four-velocity: exact Maxwell-Juttner at theta_s
+            thermal_sample(x_Ph, v);
 
             //* 2. current-carrying drift of this species, u_drift_species = u_drift_coeff_s * J_code/AMP
             real_t u_drift_species_x = ZERO, u_drift_species_y = ZERO, u_drift_species_z = ZERO;
@@ -913,6 +968,7 @@ namespace user
     private:
         const arch::energy_dist::Maxwellian<M::Dim, M::CoordType> maxwellian;
         random_number_pool_t       pool;
+        const real_t               theta;           //* kT_s / (m_s c^2)
         const real_t               u_drift_coeff;
         const InitFields<M::Dim>   flds;
         const TurbVelocity<M::Dim> vel;
@@ -952,7 +1008,7 @@ namespace user
         const real_t    B_guide;                //* guide field along x3, setup.B_guide (0 -> zero-mean-field turbulence) in code B units
         const real_t    B_perturbed_rms;        //* RMS |B_perturbed|, setup.B_perturbed_rms in code B units
         const int       kmin, kmax;             //* mode-number band (inclusive)
-        const real_t    spectral_index;         //* p in E(k) ~ k^-p  (5/3 default)
+        const real_t    spectral_slope;         //* E(k) ~ k^spectral_slope, shell spectrum (0 default = flat)
         const long long B_seed;                 //* phases of B_perturbed
         const long long v_seed;                 //* phases of u_perturbed; MUST differ from B_seed
         const int       turb_kplane;            //* k-space restriction: -1 = 3D, 0 = x1x2, 1 = x2x3, 2 = x3x1
@@ -1076,7 +1132,7 @@ namespace user
 
             g.B_perturbed_rms_component = init_turbulence(g.Lx, g.Ly, g.Lz, is_3d, g.B_perturbed_rms,
                                                           g.kmin, g.kmax, g.B_seed,
-                                                          g.spectral_index, g.turb_kplane, g.turb_a_axis,
+                                                          g.spectral_slope, g.turb_kplane, g.turb_a_axis,
                                                           g.turb_rand_amp, { cell_dx, cell_dy, cell_dz }, g.B_perturbed_modes_host);
 
             g.AMP = SQR(g.skindepth0) / g.larmor0;      //* AMP = d0^2/r0 = d0 sqrt(sigma0)
@@ -1129,7 +1185,7 @@ namespace user
                 g.u_perturbed_rms           = u_perturbed_rms_target;
                 g.u_perturbed_rms_component = init_turbulence(g.Lx, g.Ly, g.Lz, is_3d, u_perturbed_rms_target,
                                                               g.kmin, g.kmax, g.v_seed,
-                                                              g.spectral_index, g.turb_kplane, g.turb_a_axis,
+                                                              g.spectral_slope, g.turb_kplane, g.turb_a_axis,
                                                               g.turb_rand_amp, { 0.0, 0.0, 0.0 }, g.u_perturbed_modes_host);
             }
 
@@ -1349,13 +1405,27 @@ namespace user
         static constexpr real_t N_TOTAL  = static_cast<real_t>(1.0);
         static constexpr real_t N_PER_SP = static_cast<real_t>(0.5);
 
-        //? <gamma> of a 3D Maxwell-Juettner distribution, rational approximation:
-        //? 1 + 3/2 theta + 15/8 theta^2 + ... for theta -> 0 (exact to that order),
-        //? 3 theta for theta -> inf; within 1.1% of K1(1/theta)/K2(1/theta) + 3 theta
-        //? for all theta.
+        //? <gamma> of a 3D Maxwell-Juettner distribution, exactly: K1(1/theta)/K2(1/theta) + 3 theta, evaluated
+        //? by quadrature so that no special functions are needed and nothing underflows at small theta. With
+        //? eps = gamma - 1 = theta t^2, the distribution in t is  t^2 (1 + eps) sqrt(1 + eps/2) exp(-t^2)  (up to a
+        //? constant): smooth at t = 0 and negligible beyond t = 9. Simpson's rule with 4000 intervals agrees with the
+        //? Bessel-function form to ~1e-15 for 0.001 <= theta <= 100.
         static auto gamma_mean(real_t theta) -> real_t
         {
-            return ONE + theta * ((real_t)6.0 + (real_t)15.0 * theta) / ((real_t)4.0 + (real_t)5.0 * theta);
+            constexpr int    n_intervals = 4000;
+            constexpr double t_max       = 9.0;
+            const double     h           = t_max / (double)n_intervals;
+            double weight_sum = 0.0, gamma_weight_sum = 0.0;
+            for (int i = 0; i <= n_intervals; ++i)
+            {
+                const double t       = (double)i * h;
+                const double eps     = (double)theta * t * t;
+                const double weight  = t * t * (1.0 + eps) * std::sqrt(1.0 + 0.5 * eps) * std::exp(-t * t);
+                const double simpson = (i == 0 || i == n_intervals) ? 1.0 : ((i % 2 == 1) ? 4.0 : 2.0);
+                weight_sum       += simpson * weight;
+                gamma_weight_sum += simpson * (1.0 + eps) * weight;
+            }
+            return (real_t)(gamma_weight_sum / weight_sum);
         }
 
         //? Enthalpy per particle in units of m0 c^2:  h_s = m_s <gamma_s> + T_s
@@ -1371,6 +1441,19 @@ namespace user
         static auto enthalpy(real_t mass_1, real_t temperature_1_, real_t mass_2, real_t temperature_2_) -> real_t
         {
             return N_PER_SP * enthalpy_per_particle(mass_1, temperature_1_) + N_PER_SP * enthalpy_per_particle(mass_2, temperature_2_);
+        }
+
+        //? setup.spectral_slope: slope of the shell spectrum E(k) ~ k^spectral_slope, default 0 (flat).
+        //? The old key setup.spectral_index (E ~ k^-p, i.e. spectral_index = -spectral_slope) is refused,
+        //? so an old input file cannot silently produce the opposite spectrum.
+        static auto read_spectral_slope(const SimulationParams& p) -> real_t
+        {
+            const real_t old_spectral_index = p.template get<real_t>("setup.spectral_index", std::numeric_limits<real_t>::quiet_NaN());
+            raise::ErrorIf(!std::isnan((double)old_spectral_index),
+                           "setup.spectral_index has been replaced by setup.spectral_slope = -spectral_index, the slope of "
+                           "E(k) ~ k^spectral_slope (e.g. spectral_index = 1.6667 -> spectral_slope = -1.6667; "
+                           "spectral_index = -1 -> spectral_slope = 1).", HERE);
+            return p.template get<real_t>("setup.spectral_slope", ZERO);
         }
 
         static auto species_mass(Metadomain<S, M>& m, std::size_t idx) -> real_t
@@ -1403,7 +1486,7 @@ namespace user
             B_perturbed_rms   { p.template get<real_t>("setup.B_perturbed_rms", (real_t)1.0) },
             kmin              { p.template get<int>("setup.kmin", 1) },
             kmax              { p.template get<int>("setup.kmax", 4) },
-            spectral_index    { p.template get<real_t>("setup.spectral_index", (real_t)1.6666667) },
+            spectral_slope    { read_spectral_slope(p) },
             B_seed            { static_cast<long long>(p.template get<int>("setup.B_seed", 12345)) },
             v_seed            { static_cast<long long>(p.template get<int>("setup.v_seed", 67890)) },
             turb_kplane       { p.template get<int>("setup.turb_kplane", (D == Dim::_3D) ? -1 : 0) },
@@ -1840,6 +1923,125 @@ namespace user
             const double displacement_along_B     = (required_rms > 0.0) ? std::sqrt(displacement_along_B_sq * inv_n) / required_rms : 0.0;
             const double displacement_theory_rel  = (displacement_rms > 0.0) ? std::sqrt(displacement_theory_error_sq * inv_n) / displacement_rms : 0.0;
 
+            //! =================================================================
+            //! UNLOADED DISPLACEMENT CURRENT AT t = 0 (estimate)
+            //!
+            //! The drifts carry curl(B) minus the displacement current of the J x B acceleration (sigma_h
+            //! split). The rest of dE/dt at t = 0 is not loaded. With E = -(u_m x B), u_m the field-line
+            //! velocity, it is the change of E due to advection of the flow and of the field,
+            //!     D = [(u_m . grad) u_m] x B - u_m x dB/dt,        dB/dt = -curl(E).
+            //! Its part across B is the advective dE_perp/dt; its part along B equals E.curl(E)/|B|, the
+            //! parallel displacement current that keeps E.B = 0. Relative to the required current
+            //! AMP curl(B), each is |D|/|curl B| (AMP cancels), as box RMS values. Derivatives are centred
+            //! differences of the host mode sums, on at most 64 points per axis (32 in 3D). As a check, dB/dt is also
+            //! computed from the product rule, curl(u_m x B) = u_m div(B) - B div(u_m) + (B.grad)u_m - (u_m.grad)B.
+            //! =================================================================
+            auto u_motional_host = [&](double X, double Y, double Z, double (&u_motional)[3])
+            {
+                double u_perturbed_value[3], current[3];
+                u_perturbed_host(X, Y, Z, u_perturbed_value[0], u_perturbed_value[1], u_perturbed_value[2]);
+                host_first_order_current(B_perturbed_modes_host, (double)B_guide, (double)sigma_h_per_B_sq, X, Y, Z, current[0], current[1], current[2]);
+                for (int i = 0; i < 3; ++i) { u_motional[i] = u_perturbed_value[i] + (double)u_motional_coeff * current[i]; }
+            };
+
+            const bool   E_present    = E_ideal_present || (u_motional_coeff != ZERO);
+            const double fd_step      = 1.0e-3 * (double)l_inner;          //* well below the shortest injected wavelength
+            const int    n_axes       = (D == Dim::_3D) ? 3 : 2;            //* simulated directions; d/dz = 0 in 2D
+            double unloaded_perp_sq = 0.0, unloaded_par_sq = 0.0, unloaded_curl_B_sq = 0.0;
+            double dB_dt_sq = 0.0, dB_dt_mismatch_sq = 0.0;
+
+            if (mpi_rank == 0 && E_present)
+            {
+                std::array<int, 3> estimate_counts;
+                const int max_points_per_axis = (D == Dim::_3D) ? 32 : 64;   //* the RMS needs few samples; keeps the 3D setup cheap
+                for (int a = 0; a < 3; ++a) { estimate_counts[a] = std::min(counts[a], max_points_per_axis); }
+
+                for (int ix = 0; ix < estimate_counts[0]; ++ix)
+                    for (int iy = 0; iy < estimate_counts[1]; ++iy)
+                        for (int iz = 0; iz < estimate_counts[2]; ++iz)
+                        {
+                            const double X = sample_coordinate((double)xmin, (double)Lx, ix, estimate_counts[0]);
+                            const double Y = sample_coordinate((double)ymin, (double)Ly, iy, estimate_counts[1]);
+                            const double Z = (D == Dim::_3D) ? sample_coordinate((double)zmin, (double)Lz, iz, estimate_counts[2]) : 0.0;
+
+                            double u_motional[3], B[3];
+                            u_motional_host(X, Y, Z, u_motional);
+                            B_host(X, Y, Z, B[0], B[1], B[2]);
+
+                            //* derivatives d/dx_a of E, u_m and B: [axis][component]
+                            double dE[3][3] = {}, du[3][3] = {}, dB[3][3] = {};
+                            for (int a = 0; a < n_axes; ++a)
+                            {
+                                double shift[3] = { 0.0, 0.0, 0.0 };
+                                shift[a] = fd_step;
+                                double E_plus[3], E_minus[3], u_plus[3], u_minus[3], B_plus[3], B_minus[3];
+                                E_host(X + shift[0], Y + shift[1], Z + shift[2], E_plus[0], E_plus[1], E_plus[2]);
+                                E_host(X - shift[0], Y - shift[1], Z - shift[2], E_minus[0], E_minus[1], E_minus[2]);
+                                u_motional_host(X + shift[0], Y + shift[1], Z + shift[2], u_plus);
+                                u_motional_host(X - shift[0], Y - shift[1], Z - shift[2], u_minus);
+                                B_host(X + shift[0], Y + shift[1], Z + shift[2], B_plus[0], B_plus[1], B_plus[2]);
+                                B_host(X - shift[0], Y - shift[1], Z - shift[2], B_minus[0], B_minus[1], B_minus[2]);
+                                for (int c = 0; c < 3; ++c)
+                                {
+                                    dE[a][c] = (E_plus[c] - E_minus[c]) / (2.0 * fd_step);
+                                    du[a][c] = (u_plus[c] - u_minus[c]) / (2.0 * fd_step);
+                                    dB[a][c] = (B_plus[c] - B_minus[c]) / (2.0 * fd_step);
+                                }
+                            }
+
+                            //* dB/dt = -curl(E)
+                            const double dB_dt[3] = { -(dE[1][2] - dE[2][1]), -(dE[2][0] - dE[0][2]), -(dE[0][1] - dE[1][0]) };
+
+                            //* the same from the product rule, as a check of the derivatives and signs
+                            double div_B = 0.0, div_u = 0.0;
+                            for (int a = 0; a < 3; ++a) { div_B += dB[a][a]; div_u += du[a][a]; }
+                            for (int c = 0; c < 3; ++c)
+                            {
+                                double B_grad_u = 0.0, u_grad_B = 0.0;
+                                for (int a = 0; a < 3; ++a) { B_grad_u += B[a] * du[a][c]; u_grad_B += u_motional[a] * dB[a][c]; }
+                                const double dB_dt_product = u_motional[c] * div_B - B[c] * div_u + B_grad_u - u_grad_B;
+                                dB_dt_mismatch_sq += SQR(dB_dt[c] - dB_dt_product);
+                                dB_dt_sq          += SQR(dB_dt[c]);
+                            }
+
+                            //* (u_m . grad) u_m
+                            double advection[3] = { 0.0, 0.0, 0.0 };
+                            for (int c = 0; c < 3; ++c)
+                                for (int a = 0; a < 3; ++a) { advection[c] += u_motional[a] * du[a][c]; }
+
+                            //* D = [(u_m . grad) u_m] x B - u_m x dB/dt
+                            const double unloaded[3] = { (advection[1] * B[2] - advection[2] * B[1]) - (u_motional[1] * dB_dt[2] - u_motional[2] * dB_dt[1]),
+                                                         (advection[2] * B[0] - advection[0] * B[2]) - (u_motional[2] * dB_dt[0] - u_motional[0] * dB_dt[2]),
+                                                         (advection[0] * B[1] - advection[1] * B[0]) - (u_motional[0] * dB_dt[1] - u_motional[1] * dB_dt[0]) };
+
+                            //* split along and across the local B
+                            const double B_sq = SQR(B[0]) + SQR(B[1]) + SQR(B[2]);
+                            if (B_sq > 0.0)
+                            {
+                                const double along_over_B = (unloaded[0] * B[0] + unloaded[1] * B[1] + unloaded[2] * B[2]) / B_sq;
+                                unloaded_par_sq  += SQR(along_over_B) * B_sq;
+                                unloaded_perp_sq += SQR(unloaded[0] - along_over_B * B[0]) + SQR(unloaded[1] - along_over_B * B[1]) + SQR(unloaded[2] - along_over_B * B[2]);
+                            }
+
+                            double curl_B_x, curl_B_y, curl_B_z;
+                            host_curl_sum(B_perturbed_modes_host, X, Y, Z, curl_B_x, curl_B_y, curl_B_z);
+                            unloaded_curl_B_sq += SQR(curl_B_x) + SQR(curl_B_y) + SQR(curl_B_z);
+                        }
+            }
+
+            //* RMS fractions of the required current AMP curl(B)
+            const double unloaded_perp_fraction = (unloaded_curl_B_sq > 0.0) ? std::sqrt(unloaded_perp_sq / unloaded_curl_B_sq) : 0.0;
+            const double unloaded_par_fraction  = (unloaded_curl_B_sq > 0.0) ? std::sqrt(unloaded_par_sq / unloaded_curl_B_sq) : 0.0;
+            const double dB_dt_check            = (dB_dt_sq > 0.0) ? std::sqrt(dB_dt_mismatch_sq / dB_dt_sq) : 0.0;
+
+            //* fraction as a percentage, two decimals (own stream, so the printout's number format is untouched)
+            auto percent_text = [](double fraction) -> std::string
+            {
+                std::ostringstream text_stream;
+                text_stream << std::fixed << std::setprecision(2) << 100.0 * fraction << "%";
+                return text_stream.str();
+            };
+
             //* x as a percentage of the RMS required current, one decimal (own stream, so the printout's number format is untouched)
             auto percent_of_required = [&](double x) -> std::string
             {
@@ -1976,7 +2178,7 @@ namespace user
                 << "TURBULENCE SPECTRUM \n"
                 << kv1("Mode band [kmin, kmax]") << "[" << kmin << ", " << kmax << "]\n"
                 << kv1("Number of modes") << B_perturbed_modes_host.size() << "\n"
-                << kv1("Spectral index p (E ~ k^-p)") << spectral_index << "\n"
+                << kv1("Spectral slope (E(k) ~ k^slope)") << spectral_slope << "  (0 = flat; equal energy per mode at " << kspace_dim(turb_kplane, D == Dim::_3D) - 1 << ")\n"
                 << kv1("Random mode amplitudes") << (turb_rand_amp ? "YES" : "NO") << "\n"
                 << kv1("k-space") << kplane_name << "\n"
                 << kv1("Vector potential") << apol_name << "\n"
@@ -2035,10 +2237,24 @@ namespace user
                 << kv1("Species displacement RMS [d0]") << xi_rms << "  (" << xi_cells << " cells)\n"
                 << kv1("Species displacement max [d0]") << xi_max << "  (" << ((dx_d > 0.0) ? xi_max / dx_d : 0.0) << " cells)\n"
                 << kv1("Residual Gauss error (estimate)") << rho_rms * rho_rms << " of n_tot" 
-                << ((rho_rms > 0.0) ? "  (~ " + std::to_string(rho_rms * 100.0) + "% of rho; measured in the GAUSS-LAW CHECK)" : "  (n/a: rho = 0)") << "\n\n"
+                << ((rho_rms > 0.0) ? "  (~ " + std::to_string(rho_rms * 100.0) + "% of rho; measured in the GAUSS-LAW CHECK)" : "  (n/a: rho = 0)") << "\n\n";
 
 
-                << "CHARACTERISTIC SCALES\n"
+            oss << "UNLOADED DISPLACEMENT CURRENT AT t = 0 (estimates, RMS fraction of AMP curl(B))\n"
+                << "\tThe run starts with a transient of about this relative size; both vanish when E = 0 at t = 0\n";
+            if (E_present)
+            {
+                oss << kv1("Advective dE_perp/dt") << percent_text(unloaded_perp_fraction) << "  (flow and field advection; grows with vA/c)\n"
+                    << kv1("Parallel dE/dt (keeps E.B = 0)") << percent_text(unloaded_par_fraction) << "  (= E.curl(E)/|B|; grows as (u/c)^2)\n\n";
+            }
+            else
+            {
+                oss << kv1("Advective dE_perp/dt") << "0  (E = 0 at t = 0)\n"
+                    << kv1("Parallel dE/dt (keeps E.B = 0)") << "0  (E = 0 at t = 0)\n\n";
+            }
+
+
+            oss << "CHARACTERISTIC SCALES\n"
                 << "\tPlasma (as a whole)\n"
                 << kv2("Skin depth") << d_plasma << "  (resolved with " << d_plasma / dx << " cells)\n"
                 << kv2("Debye length") << lambda_Dpl << "  (resolved with " << lambda_Dpl / dx << " cells; "
@@ -2071,6 +2287,7 @@ namespace user
                 << kv1("max|div B| / max|curl B|, Yee (->0)") << divB_over_curlB << "\n"
                 << kv1("Displacement current along B / required") << displacement_along_B << "  (->0: E.B stays 0)\n"
                 << kv1("Displacement current vs f (A - rho u)_perp") << displacement_theory_rel << "  (->0, relative)\n"
+                << kv1("dB/dt: curl(E) vs product rule") << (E_present ? std::to_string(dB_dt_check) : std::string("n/a (E = 0)")) << "  (->0, relative; checks the unloaded estimate)\n"
                 << kv1("lambda_D / dx (must be >~ 1/3)") << lD_ratio << "\n\n";
 
             if (lD_ratio < DEBYE_FLOOR)
