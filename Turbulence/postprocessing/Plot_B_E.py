@@ -10,18 +10,19 @@ Usage:
     input="/scratch/project_465002528/pjd/turbulence/fields/"
     output="/scratch/project_465002528/pjd/turbulence/plots/"
 
-    srun python3 ../postprocessing/Plot_B_E.py "$input" "$output" --Lx 256.0 --Ly 256.0
+    srun python3 ../postprocessing/Plot_B_E.py "$input" "$output" --Lx 256.0 --Ly 256.0 --larmor0 10.0 --u-rms 0.04
 
     Required:
         --Lx        box length along x in code units (d_e)
         --Ly        box length along y in code units (d_e)
         --Lz        box length along z in code units (d_e); REQUIRED for a 3D run,
                     rejected for a 2D run
+        --larmor0   rho0 = m0 c^2 / (e B0) in code units, for Omega_ce t = t B_guide / rho0
 
     Optional:
-        --t-eddy    outer-scale eddy turnover time in code units; copy the value
-                    "Eddy turnover time [1/w_p1]" printed by the pgen. If given, the
-                    title also reports t / t_eddy, the natural clock for decay
+        --b-guide   guide field [B0] for Omega_ce (default: 1)
+        --u-rms     initial turbulent u_rms [c]; gives t_eddy = 1 / (k_min u_rms), k_min = 2 pi / L_x
+        --t-eddy    outer-scale eddy turnover time [1/w_pe]; overrides --u-rms
         --pct       percentile used for the colour limits (default: 99.5)
         --per-frame rescale colours independently for every snapshot. The DEFAULT is
                     the opposite: one fixed scale shared by all frames, which is what
@@ -50,6 +51,7 @@ import matplotlib.pyplot as plt
 TIME_KEY = "Time"
 N_TICKS  = 5          #! exactly this many equidistant ticks on BOTH axes of EVERY panel
 N_SAMPLE = 8          #! snapshots sampled when building the shared colour scale
+BLOCK_DE = 1.0        #! maps are block-averaged over BLOCK_DE x BLOCK_DE [d_e] before plotting (no aliasing)
 
 #! ============================================================
 #! MPI setup
@@ -67,7 +69,10 @@ parser.add_argument("outdir",      type=str,   help="Output directory for PNG pl
 parser.add_argument("--Lx",        type=float, required=True, help="Box length along x in code units")
 parser.add_argument("--Ly",        type=float, required=True, help="Box length along y in code units")
 parser.add_argument("--Lz",        type=float, default=None,  help="Box length along z in code units (required for 3D runs)")
-parser.add_argument("--t-eddy",    type=float, default=None,  dest="t_eddy", help="Outer eddy turnover time [1/w_p1] from the pgen printout")
+parser.add_argument("--larmor0",   type=float, required=True, help="rho0 = m0 c^2 / (e B0) in code units, for Omega_ce = B_guide / rho0")
+parser.add_argument("--b-guide",   type=float, default=1.0,   dest="b_guide", help="Guide field [B0] for Omega_ce (default: 1)")
+parser.add_argument("--u-rms",     type=float, default=None,  dest="u_rms", help="Initial turbulent u_rms [c]; t_eddy = 1 / (k_min u_rms), k_min = 2 pi / L_x")
+parser.add_argument("--t-eddy",    type=float, default=None,  dest="t_eddy", help="Outer eddy turnover time [1/w_pe]; overrides --u-rms")
 parser.add_argument("--pct",       type=float, default=99.5,  help="Percentile for colour limits")
 parser.add_argument("--per-frame", action="store_true", dest="per_frame", help="Rescale colours per snapshot instead of using one fixed scale")
 
@@ -78,6 +83,9 @@ Lx        = args.Lx
 Ly        = args.Ly
 Lz        = args.Lz
 t_eddy    = args.t_eddy
+larmor0   = args.larmor0
+b_guide   = args.b_guide
+u_rms     = args.u_rms
 pct       = args.pct
 per_frame = args.per_frame
 
@@ -91,6 +99,21 @@ if not (50.0 < pct <= 100.0):
     parser.error("--pct must be in (50, 100]")
 if t_eddy is not None and t_eddy <= 0.0:
     parser.error("--t-eddy must be positive")
+if larmor0 <= 0.0:
+    parser.error("--larmor0 must be positive")
+if u_rms is not None and u_rms <= 0.0:
+    parser.error("--u-rms must be positive")
+
+#! outer-scale eddy turnover time: t_eddy = 1 / (k_min u_rms),  k_min = 2 pi / L_x
+if t_eddy is None and u_rms is not None:
+    t_eddy = Lx / (2.0 * np.pi * u_rms)
+
+def time_label_text(t_code):
+    #! t c/L_x,  Omega_ce t = t B_guide / rho0,  omega_pe t = t (code time unit = 1/omega_pe, total density),  t / t_eddy
+    label = rf"$t$ = {t_code / Lx:.2f} $L_x/c$,      $\Omega_{{c,e}} t$ = {t_code * abs(b_guide) / larmor0:.1f},      $\omega_{{p,e}} t$ = {t_code:.1f}"
+    if t_eddy is not None:
+        label += rf",      $t/\tau_{{\rm eddy}}$ = {t_code / t_eddy:.2f}"
+    return label
 
 if rank == 0:
     os.makedirs(outdir, exist_ok=True)
@@ -104,15 +127,26 @@ comm.Barrier()
 #!   group : panels sharing a group share one colour scale
 #! ============================================================
 PANELS = [
-    (r"$B_x$",   "div", "seismic", "B_inplane"),
-    (r"$B_y$",   "div", "seismic", "B_inplane"),
-    (r"$B_z$",   "seq", "plasma",  "B_z"),
-    (r"$|B|$",   "seq", "inferno", "B_mag"),
-    (r"$E_x$",   "div", "seismic", "E_inplane"),
-    (r"$E_y$",   "div", "seismic", "E_inplane"),
-    (r"$E_z$",   "div", "seismic", "E_z"),
-    (r"$|E|$",   "seq", "inferno", "E_mag"),
+    (r"$B_x$",        "div", "seismic", "B_inplane"),
+    (r"$B_y$",        "div", "seismic", "B_inplane"),
+    (r"$B_z$",        "seq", "plasma",  "B_z"),
+    (r"$|B_{XY}|$",   "seq", "inferno", "B_mag"),
+    (r"$E_x$",        "div", "seismic", "E_inplane"),
+    (r"$E_y$",        "div", "seismic", "E_inplane"),
+    (r"$E_z$",        "div", "seismic", "E_z"),
+    (r"$|E_{XY}|$",   "seq", "inferno", "E_mag"),
 ]
+
+PANEL_UNITS = {
+    r"$B_x$":       r"[$B_0$]",
+    r"$B_y$":       r"[$B_0$]",
+    r"$B_z$":       r"[$B_0$]",
+    r"$|B_{XY}|$":  r"[$B_0$]",
+    r"$E_x$":       r"[$B_0$]",
+    r"$E_y$":       r"[$B_0$]",
+    r"$E_z$":       r"[$B_0$]",
+    r"$|E_{XY}|$":  r"[$B_0$]",
+}
 
 GROUP_KIND = {}
 for _label, _kind, _cmap, _group in PANELS:
@@ -191,8 +225,11 @@ if rank == 0:
     if is_3d:
         print(f"    Box length L_z [d_e] = {Lz}", flush=True)
         print(f"    Cut plane           = z = {0.5 * Lz:g} (k = {Nz_global // 2} of {Nz_global})", flush=True)
+    print(f"    rho0, B_guide        = {larmor0:g}, {b_guide:g}", flush=True)
     if t_eddy is not None:
-        print(f"    Eddy turnover  [1/w_p] = {t_eddy}", flush=True)
+        print(f"    Eddy turnover [1/w_pe] = {t_eddy:.6g}", flush=True)
+    else:
+        print("    Eddy turnover        = not given (pass --u-rms or --t-eddy)", flush=True)
     print(f"    Colour scale        = {'per frame' if per_frame else 'fixed across all frames'}", flush=True)
     print(" ", flush=True)
 
@@ -221,6 +258,22 @@ def read_plane(stream, name, Nx, Ny, Nz, k, missing):
         return None
 
     return a.reshape(int(Ny), int(Nx))
+
+def block_size(Nx, Ny):
+    #! divisor of gcd(Nx, Ny) closest to BLOCK_DE in cells, so the blocks tile the plane exactly
+    target   = BLOCK_DE * Nx / Lx
+    common   = int(np.gcd(int(Nx), int(Ny)))
+    divisors = [d for d in range(1, common + 1) if common % d == 0]
+    return min(divisors, key=lambda d: abs(d - target))
+
+def block_average(data, block):
+    #! mean over block x block cells, ignoring blanked (NaN) cells
+    if data is None or block <= 1:
+        return data
+    rows, columns = data.shape
+    blocks = data.reshape(rows // block, block, columns // block, block)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        return np.nansum(blocks, axis=(1, 3)) / np.sum(np.isfinite(blocks), axis=(1, 3))
 
 def load_panels(fname):
     """
@@ -254,21 +307,20 @@ def load_panels(fname):
     have_B = (Bx is not None) and (By is not None) and (Bz is not None)
     have_E = (Ex is not None) and (Ey is not None) and (Ez is not None)
 
-    #! |B| uses the FULL field including the guide field; only the Bz panel shows the
-    #! fluctuation. Mixing the two in one figure is deliberate: |B| tells you about
-    #! compressibility, dBz about the fluctuation structure.
+    #! in-plane magnitudes: |B_XY| = sqrt(Bx^2 + By^2), |E_XY| = sqrt(Ex^2 + Ey^2)
     B_mag = np.sqrt(Bx**2 + By**2) if have_B else None
-    E_mag = np.sqrt(Ex**2 + Ey**2 + Ez**2) if have_E else None
+    E_mag = np.sqrt(Ex**2 + Ey**2) if have_E else None
 
+    block = block_size(Nx, Ny)
     panels = {
-        r"$B_x$":  Bx,
-        r"$B_y$":  By,
-        r"$B_z$":  Bz,
-        r"$|B|$":  B_mag,
-        r"$E_x$":  Ex,
-        r"$E_y$":  Ey,
-        r"$E_z$":  Ez,
-        r"$|E|$":  E_mag,
+        r"$B_x$":       block_average(Bx, block),
+        r"$B_y$":       block_average(By, block),
+        r"$B_z$":       block_average(Bz, block),
+        r"$|B_{XY}|$":  block_average(B_mag, block),
+        r"$E_x$":       block_average(Ex, block),
+        r"$E_y$":       block_average(Ey, block),
+        r"$E_z$":       block_average(Ez, block),
+        r"$|E_{XY}|$":  block_average(E_mag, block),
     }
     return panels, t_code, x, y, missing
 
@@ -373,9 +425,7 @@ for fname in files_local:
     #! Time labels. t_code is t w_p; t c/L_x is the light crossing count.
     #! ========================================================
     if not np.isnan(t_code):
-        time_label = f"$t\\,\\omega_{{p}} = {t_code:.1f}$   |   $t\\,c/L_x = {t_code / Lx:.3f}$"
-        if t_eddy is not None:
-            time_label += f"   |   $t/t_{{\\rm eddy}} = {t_code / t_eddy:.2f}$"
+        time_label = time_label_text(t_code)
         if is_3d:
             time_label += f"   |   $z = {0.5 * Lz:g}\\,d_e$"
     else:
@@ -411,7 +461,9 @@ for fname in files_local:
         im = ax.imshow(data, origin="lower", aspect="equal",
                        extent=[x_lo, x_hi, y_lo, y_hi], cmap=cmap, vmin=vmin, vmax=vmax)
 
-        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        if PANEL_UNITS[label]:
+            cbar.set_label(PANEL_UNITS[label])
 
     fig.suptitle(time_label, fontsize=16, y=1.00)
     fig.tight_layout()

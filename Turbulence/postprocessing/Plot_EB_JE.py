@@ -10,17 +10,19 @@ Usage:
     input="/scratch/project_465002528/pjd/turbulence/fields/"
     output="/scratch/project_465002528/pjd/turbulence/plots/"
 
-    srun python3 ../postprocessing/Plot_EB_JE.py "$input" "$output" --Lx 256.0 --Ly 256.0
+    srun python3 ../postprocessing/Plot_EB_JE.py "$input" "$output" --Lx 256.0 --Ly 256.0 --larmor0 10.0 --u-rms 0.04
 
     Required:
         --Lx        box length along x in code units (d_e)
         --Ly        box length along y in code units (d_e)
         --Lz        box length along z in code units (d_e); REQUIRED for a 3D run,
                     rejected for a 2D run
+        --larmor0   rho0 = m0 c^2 / (e B0) in code units, for Omega_ce t = t B_guide / rho0
 
     Optional:
-        --t-eddy    outer-scale eddy turnover time in code units; copy the value
-                    "Eddy turnover time [1/w_p1]" printed by the pgen
+        --b-guide   guide field [B0] for Omega_ce (default: 1)
+        --u-rms     initial turbulent u_rms [c]; gives t_eddy = 1 / (k_min u_rms), k_min = 2 pi / L_x
+        --t-eddy    outer-scale eddy turnover time [1/w_pe]; overrides --u-rms
         --pct       percentile used for the colour limits (default: 99.5)
         --per-frame rescale colours independently for every snapshot
                     (default: fixed scale shared by all frames)
@@ -63,6 +65,7 @@ N_TICKS  = 5          #! exactly this many equidistant ticks on BOTH axes of EVE
 N_SAMPLE = 8          #! snapshots sampled when building the shared colour scale
 E_FLOOR  = 0.05       #! blank E.B/(|E||B|) where |E| < E_FLOOR x RMS |E| of the plane (angle is noise there)
 RMS_CHUNK_Z = 16      #! 3D: z-planes read at a time for the box RMS of J (memory ~ 3 x RMS_CHUNK_Z x Nx x Ny values)
+BLOCK_DE = 1.0        #! maps are block-averaged over BLOCK_DE x BLOCK_DE [d_e] before plotting (no aliasing)
 
 #! ============================================================
 #! MPI setup
@@ -80,7 +83,10 @@ parser.add_argument("outdir",      type=str,   help="Output directory for PNG pl
 parser.add_argument("--Lx",        type=float, required=True, help="Box length along x in code units")
 parser.add_argument("--Ly",        type=float, required=True, help="Box length along y in code units")
 parser.add_argument("--Lz",        type=float, default=None,  help="Box length along z in code units (required for 3D runs)")
-parser.add_argument("--t-eddy",    type=float, default=None,  dest="t_eddy", help="Outer eddy turnover time [1/w_p1] from the pgen printout")
+parser.add_argument("--larmor0",   type=float, required=True, help="rho0 = m0 c^2 / (e B0) in code units, for Omega_ce = B_guide / rho0")
+parser.add_argument("--b-guide",   type=float, default=1.0,   dest="b_guide", help="Guide field [B0] for Omega_ce (default: 1)")
+parser.add_argument("--u-rms",     type=float, default=None,  dest="u_rms", help="Initial turbulent u_rms [c]; t_eddy = 1 / (k_min u_rms), k_min = 2 pi / L_x")
+parser.add_argument("--t-eddy",    type=float, default=None,  dest="t_eddy", help="Outer eddy turnover time [1/w_pe]; overrides --u-rms")
 parser.add_argument("--pct",       type=float, default=99.5,  help="Percentile for colour limits")
 parser.add_argument("--per-frame", action="store_true", dest="per_frame", help="Rescale colours per snapshot instead of using one fixed scale")
 
@@ -91,6 +97,9 @@ Lx        = args.Lx
 Ly        = args.Ly
 Lz        = args.Lz
 t_eddy    = args.t_eddy
+larmor0   = args.larmor0
+b_guide   = args.b_guide
+u_rms     = args.u_rms
 pct       = args.pct
 per_frame = args.per_frame
 
@@ -104,6 +113,21 @@ if not (50.0 < pct <= 100.0):
     parser.error("--pct must be in (50, 100]")
 if t_eddy is not None and t_eddy <= 0.0:
     parser.error("--t-eddy must be positive")
+if larmor0 <= 0.0:
+    parser.error("--larmor0 must be positive")
+if u_rms is not None and u_rms <= 0.0:
+    parser.error("--u-rms must be positive")
+
+#! outer-scale eddy turnover time: t_eddy = 1 / (k_min u_rms),  k_min = 2 pi / L_x
+if t_eddy is None and u_rms is not None:
+    t_eddy = Lx / (2.0 * np.pi * u_rms)
+
+def time_label_text(t_code):
+    #! t c/L_x,  Omega_ce t = t B_guide / rho0,  omega_pe t = t (code time unit = 1/omega_pe, total density),  t / t_eddy
+    label = rf"$t$ = {t_code / Lx:.2f} $L_x/c$,      $\Omega_{{c,e}} t$ = {t_code * abs(b_guide) / larmor0:.1f},      $\omega_{{p,e}} t$ = {t_code:.1f}"
+    if t_eddy is not None:
+        label += rf",      $t/\tau_{{\rm eddy}}$ = {t_code / t_eddy:.2f}"
+    return label
 
 if rank == 0:
     os.makedirs(outdir, exist_ok=True)
@@ -126,6 +150,12 @@ PANELS = [
 ]
 MAP_POSITIONS    = [(0, 0), (1, 0), (1, 1)]     #! (row, column) of each map in PANELS
 SERIES_POSITION  = (0, 1)                       #! J rms time series, top right
+
+PANEL_UNITS = {
+    EB_LABEL:    "",
+    JEPAR_LABEL: r"[$n_0 e c B_0$]",
+    JEPER_LABEL: r"[$n_0 e c B_0$]",
+}
 
 GROUP_KIND = {}
 for _label, _kind, _cmap, _group in PANELS:
@@ -204,8 +234,11 @@ if rank == 0:
     if is_3d:
         print(f"    Box length L_z [d_e] = {Lz}", flush=True)
         print(f"    Cut plane           = z = {0.5 * Lz:g} (k = {Nz_global // 2} of {Nz_global})", flush=True)
+    print(f"    rho0, B_guide        = {larmor0:g}, {b_guide:g}", flush=True)
     if t_eddy is not None:
-        print(f"    Eddy turnover  [1/w_p] = {t_eddy}", flush=True)
+        print(f"    Eddy turnover [1/w_pe] = {t_eddy:.6g}", flush=True)
+    else:
+        print("    Eddy turnover        = not given (pass --u-rms or --t-eddy)", flush=True)
     print(f"    Colour scale        = {'per frame' if per_frame else 'fixed across all frames'}", flush=True)
     print(f"    E.B angle blanked where |E| < {E_FLOOR:g} x RMS |E|", flush=True)
     print(" ", flush=True)
@@ -237,12 +270,28 @@ def read_plane(stream, name, Nx, Ny, Nz, k, missing):
 
     return a.reshape(int(Ny), int(Nx))
 
+def block_size(Nx, Ny):
+    #! divisor of gcd(Nx, Ny) closest to BLOCK_DE in cells, so the blocks tile the plane exactly
+    target   = BLOCK_DE * Nx / Lx
+    common   = int(np.gcd(int(Nx), int(Ny)))
+    divisors = [d for d in range(1, common + 1) if common % d == 0]
+    return min(divisors, key=lambda d: abs(d - target))
+
+def block_average(data, block):
+    #! mean over block x block cells, ignoring blanked (NaN) cells
+    if data is None or block <= 1:
+        return data
+    rows, columns = data.shape
+    blocks = data.reshape(rows // block, block, columns // block, block)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        return np.nansum(blocks, axis=(1, 3)) / np.sum(np.isfinite(blocks), axis=(1, 3))
+
 def load_panels(fname):
     """
     Everything one figure needs, from one open of the file. Used BOTH by the colour-
     scale scan and by the plotting loop, so the two can never disagree.
 
-    Returns (panels, t_code, x, y, missing); a panel value of None means "not in the
+    Returns (panels, t_code, x, y, missing, box_means); a panel value of None means "not in the
     dump, leave it blank".
     """
     missing = set()
@@ -296,12 +345,18 @@ def load_panels(fname):
             JE_par  = J_par * E_par                         #! J_par E_par
             JE_perp = JdotE - JE_par                        #! J_perp . E_perp, so the two add up to J.E exactly
 
-    panels = {
-        EB_LABEL:    EB_angle,
-        JEPAR_LABEL: JE_par,
-        JEPER_LABEL: JE_perp,
+    box_means = {
+        JEPAR_LABEL: float(np.nanmean(JE_par, dtype=np.float64)) if JE_par is not None else None,
+        JEPER_LABEL: float(np.nanmean(JE_perp, dtype=np.float64)) if JE_perp is not None else None,
     }
-    return panels, t_code, x, y, missing
+
+    block = block_size(Nx, Ny)
+    panels = {
+        EB_LABEL:    block_average(EB_angle, block),
+        JEPAR_LABEL: block_average(JE_par, block),
+        JEPER_LABEL: block_average(JE_perp, block),
+    }
+    return panels, t_code, x, y, missing, box_means
 
 def panel_extremum(data, kind):
     if data is None:
@@ -343,7 +398,7 @@ def scan_limits(all_files):
         acc = {group: None for group in GROUP_KIND}
         missing = set()
         for i in idx:
-            panels, _, _, _, miss = load_panels(all_files[i])
+            panels, _, _, _, miss, _ = load_panels(all_files[i])
             missing |= miss
             accumulate(acc, panels)
 
@@ -438,7 +493,7 @@ for fname in files_local:
 
     step_idx = step_from_fname(fname)
 
-    panels, t_code, x, y, missing = load_panels(fname)
+    panels, t_code, x, y, missing, box_means = load_panels(fname)
 
     #! sanity check: the file should agree with --Lx/--Ly to within about one cell
     if rank == 0 and fname == files_local[0]:
@@ -455,9 +510,7 @@ for fname in files_local:
     #! Time labels. t_code is t w_p; t c/L_x is the light crossing count.
     #! ========================================================
     if not np.isnan(t_code):
-        time_label = f"$t\\,\\omega_{{p}} = {t_code:.1f}$   |   $t\\,c/L_x = {t_code / Lx:.3f}$"
-        if t_eddy is not None:
-            time_label += f"   |   $t/t_{{\\rm eddy}} = {t_code / t_eddy:.2f}$"
+        time_label = time_label_text(t_code)
         if is_3d:
             time_label += f"   |   $z = {0.5 * Lz:g}\\,d_e$"
     else:
@@ -474,7 +527,10 @@ for fname in files_local:
 
         data = panels[label]
 
-        ax.set_title(label)
+        if box_means.get(label) is not None:
+            ax.set_title(f"{label}   ({'plane' if is_3d else 'box'} mean = {box_means[label]:.3g})")
+        else:
+            ax.set_title(label)
         ax.tick_params(axis="both", which="major", labelsize=10, length=6)
         ax.set_xlabel(r"$x\ [d_e]$")
         ax.set_ylabel(r"$y\ [d_e]$")
@@ -497,7 +553,9 @@ for fname in files_local:
         im = ax.imshow(np.ma.masked_invalid(data), origin="lower", aspect="equal",
                        extent=[x_lo, x_hi, y_lo, y_hi], cmap=cmap_obj, vmin=vmin, vmax=vmax)
 
-        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        if PANEL_UNITS[label]:
+            cbar.set_label(PANEL_UNITS[label])
 
     #* J rms time series (Franci et al. 2022, Fig. 1a): whole run, t_peak marked, this snapshot in grey
     ax = axs[SERIES_POSITION]
@@ -515,7 +573,7 @@ for fname in files_local:
     else:
         ax.text(0.5, 0.5, "J not in dump", transform=ax.transAxes, ha="center", va="center", fontsize=11, color="0.5")
     ax.set_xlabel(r"$t\,c/L_x$")
-    ax.set_ylabel(r"$J^{\rm rms}$ [code units]")
+    ax.set_ylabel(r"$J^{\rm rms}$ [$n_0 e c$]")
     ax.tick_params(axis="both", which="major", labelsize=10, length=6)
 
     fig.suptitle(time_label, fontsize=16, y=1.00)

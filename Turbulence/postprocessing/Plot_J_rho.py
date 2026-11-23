@@ -10,19 +10,21 @@ Usage:
     input="/scratch/project_465002528/pjd/turbulence/fields/"
     output="/scratch/project_465002528/pjd/turbulence/plots/"
 
-    srun python3 ../postprocessing/Plot_J_rho.py "$input" "$output" --Lx 256.0 --Ly 256.0
+    srun python3 ../postprocessing/Plot_J_rho.py "$input" "$output" --Lx 256.0 --Ly 256.0 --larmor0 10.0 --u-rms 0.04
 
     Required:
         --Lx        box length along x in code units (d_e)
         --Ly        box length along y in code units (d_e)
         --Lz        box length along z in code units (d_e); REQUIRED for a 3D run,
                     rejected for a 2D run
+        --larmor0   rho0 = m0 c^2 / (e B0) in code units, for Omega_ce t = t B_guide / rho0
 
     Optional:
         --dens-var  density variable name in the .bp file (default: fN). Use fN_1 /
                     fN_2 if Entity was configured to write per-species moments
-        --t-eddy    outer-scale eddy turnover time in code units; copy the value
-                    "Eddy turnover time [1/w_p1]" printed by the pgen
+        --b-guide   guide field [B0] for Omega_ce (default: 1)
+        --u-rms     initial turbulent u_rms [c]; gives t_eddy = 1 / (k_min u_rms), k_min = 2 pi / L_x
+        --t-eddy    outer-scale eddy turnover time [1/w_pe]; overrides --u-rms
         --pct       percentile used for the colour limits (default: 99.5)
         --per-frame rescale colours independently for every snapshot 
                     (default: fixed scale shared by all frames, which is what a DECAYING 
@@ -58,6 +60,7 @@ import matplotlib.pyplot as plt
 TIME_KEY = "Time"
 N_TICKS  = 5          #! exactly this many equidistant ticks on BOTH axes of EVERY panel
 N_SAMPLE = 8          #! snapshots sampled when building the shared colour scale
+BLOCK_DE = 1.0        #! maps are block-averaged over BLOCK_DE x BLOCK_DE [d_e] before plotting (no aliasing)
 
 #! ============================================================
 #! MPI setup
@@ -76,7 +79,10 @@ parser.add_argument("--Lx",        type=float, required=True, help="Box length a
 parser.add_argument("--Ly",        type=float, required=True, help="Box length along y in code units")
 parser.add_argument("--Lz",        type=float, default=None,  help="Box length along z in code units (required for 3D runs)")
 parser.add_argument("--dens-var",  type=str,   default="fN",  dest="dens_var", help="Density variable name (fN, fN_1, fN_2, ...)")
-parser.add_argument("--t-eddy",    type=float, default=None,  dest="t_eddy", help="Outer eddy turnover time [1/w_p1] from the pgen printout")
+parser.add_argument("--larmor0",   type=float, required=True, help="rho0 = m0 c^2 / (e B0) in code units, for Omega_ce = B_guide / rho0")
+parser.add_argument("--b-guide",   type=float, default=1.0,   dest="b_guide", help="Guide field [B0] for Omega_ce (default: 1)")
+parser.add_argument("--u-rms",     type=float, default=None,  dest="u_rms", help="Initial turbulent u_rms [c]; t_eddy = 1 / (k_min u_rms), k_min = 2 pi / L_x")
+parser.add_argument("--t-eddy",    type=float, default=None,  dest="t_eddy", help="Outer eddy turnover time [1/w_pe]; overrides --u-rms")
 parser.add_argument("--pct",       type=float, default=99.5,  help="Percentile for colour limits")
 parser.add_argument("--per-frame", action="store_true", dest="per_frame", help="Rescale colours per snapshot instead of using one fixed scale")
 
@@ -88,6 +94,9 @@ Ly        = args.Ly
 Lz        = args.Lz
 dens_var  = args.dens_var
 t_eddy    = args.t_eddy
+larmor0   = args.larmor0
+b_guide   = args.b_guide
+u_rms     = args.u_rms
 pct       = args.pct
 per_frame = args.per_frame
 
@@ -101,6 +110,21 @@ if not (50.0 < pct <= 100.0):
     parser.error("--pct must be in (50, 100]")
 if t_eddy is not None and t_eddy <= 0.0:
     parser.error("--t-eddy must be positive")
+if larmor0 <= 0.0:
+    parser.error("--larmor0 must be positive")
+if u_rms is not None and u_rms <= 0.0:
+    parser.error("--u-rms must be positive")
+
+#! outer-scale eddy turnover time: t_eddy = 1 / (k_min u_rms),  k_min = 2 pi / L_x
+if t_eddy is None and u_rms is not None:
+    t_eddy = Lx / (2.0 * np.pi * u_rms)
+
+def time_label_text(t_code):
+    #! t c/L_x,  Omega_ce t = t B_guide / rho0,  omega_pe t = t (code time unit = 1/omega_pe, total density),  t / t_eddy
+    label = rf"$t$ = {t_code / Lx:.2f} $L_x/c$,      $\Omega_{{c,e}} t$ = {t_code * abs(b_guide) / larmor0:.1f},      $\omega_{{p,e}} t$ = {t_code:.1f}"
+    if t_eddy is not None:
+        label += rf",      $t/\tau_{{\rm eddy}}$ = {t_code / t_eddy:.2f}"
+    return label
 
 if rank == 0:
     os.makedirs(outdir, exist_ok=True)
@@ -128,6 +152,15 @@ PANELS = [
     (DENS_LABEL, "seq", "inferno", "density"),
     (JE_LABEL,   "div", "seismic", "JdotE"),
 ]
+
+PANEL_UNITS = {
+    JX_LABEL:   r"[$n_0 e c$]",
+    JY_LABEL:   r"[$n_0 e c$]",
+    JZ_LABEL:   r"[$n_0 e c$]",
+    JMAG_LABEL: r"[$n_0 e c$]",
+    DENS_LABEL: "",
+    JE_LABEL:   r"[$n_0 e c B_0$]",
+}
 
 GROUP_KIND = {}
 for _label, _kind, _cmap, _group in PANELS:
@@ -207,8 +240,11 @@ if rank == 0:
         print(f"    Box length L_z [d_e] = {Lz}", flush=True)
         print(f"    Cut plane           = z = {0.5 * Lz:g} (k = {Nz_global // 2} of {Nz_global})", flush=True)
     print(f"    Density variable    = {dens_var}", flush=True)
+    print(f"    rho0, B_guide        = {larmor0:g}, {b_guide:g}", flush=True)
     if t_eddy is not None:
-        print(f"    Eddy turnover  [1/w_p] = {t_eddy}", flush=True)
+        print(f"    Eddy turnover [1/w_pe] = {t_eddy:.6g}", flush=True)
+    else:
+        print("    Eddy turnover        = not given (pass --u-rms or --t-eddy)", flush=True)
     print(f"    Colour scale        = {'per frame' if per_frame else 'fixed across all frames'}", flush=True)
     print(" ", flush=True)
 
@@ -238,6 +274,22 @@ def read_plane(stream, name, Nx, Ny, Nz, k, missing):
         return None
 
     return a.reshape(int(Ny), int(Nx))
+
+def block_size(Nx, Ny):
+    #! divisor of gcd(Nx, Ny) closest to BLOCK_DE in cells, so the blocks tile the plane exactly
+    target   = BLOCK_DE * Nx / Lx
+    common   = int(np.gcd(int(Nx), int(Ny)))
+    divisors = [d for d in range(1, common + 1) if common % d == 0]
+    return min(divisors, key=lambda d: abs(d - target))
+
+def block_average(data, block):
+    #! mean over block x block cells, ignoring blanked (NaN) cells
+    if data is None or block <= 1:
+        return data
+    rows, columns = data.shape
+    blocks = data.reshape(rows // block, block, columns // block, block)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        return np.nansum(blocks, axis=(1, 3)) / np.sum(np.isfinite(blocks), axis=(1, 3))
 
 def load_panels(fname):
     """
@@ -283,13 +335,14 @@ def load_panels(fname):
         n_mean = float(np.mean(n))
         n_norm = n / n_mean if n_mean > 0.0 else n
 
+    block = block_size(Nx, Ny)
     panels = {
-        JX_LABEL:   Jx,
-        JY_LABEL:   Jy,
-        JZ_LABEL:   Jz,
-        JMAG_LABEL: J_mag,
-        DENS_LABEL: n_norm,
-        JE_LABEL:   JdotE,
+        JX_LABEL:   block_average(Jx, block),
+        JY_LABEL:   block_average(Jy, block),
+        JZ_LABEL:   block_average(Jz, block),
+        JMAG_LABEL: block_average(J_mag, block),
+        DENS_LABEL: block_average(n_norm, block),
+        JE_LABEL:   block_average(JdotE, block),
     }
     return panels, t_code, x, y, missing
 
@@ -395,9 +448,7 @@ for fname in files_local:
     #! Time labels. t_code is t w_p; t c/L_x is the light crossing count.
     #! ========================================================
     if not np.isnan(t_code):
-        time_label = f"$t\\,\\omega_{{p}} = {t_code:.1f}$   |   $t\\,c/L_x = {t_code / Lx:.3f}$"
-        if t_eddy is not None:
-            time_label += f"   |   $t/t_{{\\rm eddy}} = {t_code / t_eddy:.2f}$"
+        time_label = time_label_text(t_code)
         if is_3d:
             time_label += f"   |   $z = {0.5 * Lz:g}\\,d_e$"
     else:
@@ -433,7 +484,9 @@ for fname in files_local:
         im = ax.imshow(data, origin="lower", aspect="equal",
                        extent=[x_lo, x_hi, y_lo, y_hi], cmap=cmap, vmin=vmin, vmax=vmax)
 
-        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        if PANEL_UNITS[label]:
+            cbar.set_label(PANEL_UNITS[label])
 
     fig.suptitle(time_label, fontsize=16, y=1.00)
     fig.tight_layout()

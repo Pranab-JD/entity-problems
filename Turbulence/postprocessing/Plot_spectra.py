@@ -19,6 +19,7 @@ Usage
         --larmor0     [scales] larmor0, for the gyroradius axis along the top
 
     Optional:
+        --b-guide     guide field [B0] for the gyroradius axis (default 1)
         --R           tube radius in code units; adds t c/R to the figure title
         --pair        species 2 is a POSITRON (light limits); default treats it as an ION
         --mass-ratio  species 2 / species 1 mass, for its gyroradius axis (default 1)
@@ -59,6 +60,7 @@ parser.add_argument("outdir",       type=str)
 parser.add_argument("--Lx",         type=float, required=True)
 parser.add_argument("--R",          type=float, default=None, help="tube radius in code units; adds t c/R to the title")
 parser.add_argument("--larmor0",    type=float, required=True)
+parser.add_argument("--b-guide",    dest="b_guide", type=float, default=1.0, help="guide field [B0] for the gyroradius axis")
 parser.add_argument("--mass-ratio", dest="mass_ratio", type=float, default=1.0)
 parser.add_argument("--species",    type=str, default="1,2")
 parser.add_argument("--pair",       action="store_true")
@@ -70,6 +72,7 @@ BASE, OUTDIR = args.base, args.outdir
 SPECIES      = [int(s) for s in args.species.split(",") if s.strip() != ""]
 IS_PAIR      = args.pair
 LX, LARMOR0  = float(args.Lx), float(args.larmor0)
+B_GUIDE      = float(args.b_guide)
 R_TUBE       = float(args.R) if args.R is not None else None
 MR           = float(args.mass_ratio)
 
@@ -77,6 +80,8 @@ if LX <= 0.0:
     parser.error("--Lx must be positive")
 if LARMOR0 <= 0.0:
     parser.error("--larmor0 must be positive")
+if B_GUIDE == 0.0:
+    parser.error("--b-guide must be nonzero")
 if R_TUBE is not None and R_TUBE <= 0.0:
     parser.error("--R must be positive")
 
@@ -117,7 +122,7 @@ def pick_var(names, candidates, s=None):
 def species_info(sp):
     """
     Label, X limits and the gyroradius scaling for one species index. Species 1 is the electron;
-    species 2 is a positron with --pair and an ion otherwise. r_L = larmor0 * (m/m_e) * u, so the heavy
+    species 2 is a positron with --pair and an ion otherwise. r_L = larmor0 * (m/m_e) * u / B_guide, so the heavy
     species needs the mass ratio in its top axis.
     """
     if sp == 1:
@@ -150,7 +155,7 @@ if args.list_vars:
 #! ============================================================
 #! Read every file:  spectra[sp] = list of (t c/L_x, bins, counts)
 #! ============================================================
-print(f"\nFound {len(files)} spectra files   (L_x = {LX:g}, larmor0 = {LARMOR0:g})", flush=True)
+print(f"\nFound {len(files)} spectra files   (L_x = {LX:g}, larmor0 = {LARMOR0:g}, B_guide = {B_GUIDE:g})", flush=True)
 
 spectra    = {sp: [] for sp in SPECIES}
 times      = []                                   #! t c / L_x, used for the colour scale
@@ -218,12 +223,11 @@ for ax, sp in zip(axs, to_plot):
     ax.set_xlim(left=xlo, right=xhi)
     ax.set_ylim(bottom=Y_MIN, top=Y_MAX)
 
-    #! top axis: the relativistic gyroradius of a particle at that energy, r_L = larmor0 * (m/m_e) * u
-    #! with u = sqrt(gamma^2 - 1). Valid at B = B_BG; inside the sheet the local field is smaller.
-    rL   = lambda gm1: LARMOR0 * mass * np.sqrt((gm1 + 1.0) ** 2 - 1.0)
-    gm1  = lambda r:   np.sqrt(1.0 + (r / (LARMOR0 * mass)) ** 2) - 1.0
+    #! top axis: the relativistic gyroradius at B = B_guide, r_L = larmor0 * (m/m_e) * u / B_guide, u = sqrt(gamma^2 - 1)
+    rL   = lambda gm1: LARMOR0 * mass * np.sqrt((gm1 + 1.0) ** 2 - 1.0) / abs(B_GUIDE)
+    gm1  = lambda r:   np.sqrt(1.0 + (r * abs(B_GUIDE) / (LARMOR0 * mass)) ** 2) - 1.0
     secax = ax.secondary_xaxis("top", functions=(rL, gm1))
-    secax.set_xlabel(r"$r_L/d_0$", fontsize=14)
+    secax.set_xlabel(r"$r_L/d_e$  (at $B_{\rm guide}$)", fontsize=14)
 
 sm = cm.ScalarMappable(norm=norm, cmap=cmap)
 sm.set_array([])
