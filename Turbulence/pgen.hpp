@@ -22,6 +22,7 @@
 #include "archetypes/particle_injector.h"
 #include "kernels/divergences.hpp"
 
+#include <any>
 #include <array>
 #include <cmath>
 #include <string>
@@ -33,6 +34,7 @@
 #include <sstream>
 #include <iomanip>
 #include <algorithm>
+#include <typeinfo>
 
 //! =============================================================================
 //!  PROBLEM DESCRIPTION
@@ -153,8 +155,8 @@ namespace user
     //* A_m = a_k e_A sin(k.x + ph)  =>  b_m cos(k.x + ph) with b_m = a_k (k x e_A):
     //* divergence-free by construction, with |b_m| = a_k |k| since e_A _|_ k.
     //*
-    //* a_k ~ (k/k0)^((spectral_slope - dim - 1)/2): with N(k)dk ~ k^(dim-1)dk modes per shell this
-    //* yields E(k) ~ k^(dim-1)|b_k|^2 ~ k^spectral_slope. dim = 2 -> (spectral_slope - 3)/2, dim = 3 -> (spectral_slope - 4)/2
+    //* a_k ~ (k/k0)^((shell_spectrum_slope - dim - 1)/2): with N(k)dk ~ k^(dim-1)dk modes per shell this
+    //* yields E(k) ~ k^(dim-1)|b_k|^2 ~ k^shell_spectrum_slope. dim = 2 -> (shell_spectrum_slope - 3)/2, dim = 3 -> (shell_spectrum_slope - 4)/2
 
     //* Yee-matched wavenumber k~ = (2/h) sin(k h/2): the one-cell centred difference of cos(k x) is exactly -k~ sin(k x); h = 0 -> continuum k
     inline auto yee_wavenumber(double k, double h) -> double
@@ -168,15 +170,15 @@ namespace user
                                 real_t                 Ly,
                                 real_t                 Lz,
                                 bool                   is_3d,
-                                real_t                 rms_target,      //* total RMS of the mode sum
+                                real_t                 rms_target,            //* total RMS of the mode sum
                                 int                    kmin,
                                 int                    kmax,
                                 long long              seed,
-                                real_t                 spectral_slope,  //* E(k) ~ k^spectral_slope (shell spectrum)
-                                int                    kplane,          //* -1 = full 3D, 0 = x1x2, 1 = x2x3, 2 = x3x1
-                                int                    a_axis,          //* -1 = random e_A _|_ k, else 0/1/2 = fixed axis
-                                bool                   random_amp,      //* Gaussian mode amplitudes
-                                const std::array<double, 3>& cell_size, //* Yee cell (dx, dy, dz) for k~, or zeros for continuum k
+                                real_t                 shell_spectrum_slope,  //* E(k) ~ k^shell_spectrum_slope (shell spectrum)
+                                int                    kplane,                //* -1 = full 3D, 0 = x1x2, 1 = x2x3, 2 = x3x1
+                                int                    a_axis,                //* -1 = random e_A _|_ k, else 0/1/2 = fixed axis
+                                bool                   random_amp,            //* Gaussian mode amplitudes
+                                const std::array<double, 3>& cell_size,       //* Yee cell (dx, dy, dz) for k~, or zeros for continuum k
                                 std::vector<TurbMode>& modes_out) -> std::array<real_t, 3>
     {
         modes_out.clear();
@@ -210,18 +212,18 @@ namespace user
         //! dim is the dimensionality of K-SPACE, not of the simulation
         const double dim = (double)kspace_dim(kplane, is_3d);
 
-        //~ E(k) ~ k^spectral_slope: the energy summed over a |k| shell, i.e. the slope read off a
+        //~ E(k) ~ k^shell_spectrum_slope: the energy summed over a |k| shell, i.e. the slope read off a
         //~ power-spectrum plot. A shell holds ~ k^(dim-1) modes and |b_m| = a_k |k|, so the energy of
-        //~ ONE mode goes as k^(spectral_slope - (dim-1)). Two values worth knowing:
+        //~ ONE mode goes as k^(shell_spectrum_slope - (dim-1)). Two values worth knowing:
         //~
-        //~   spectral_slope = 0       -> E(k) = const: equal energy in each |k| SHELL. The number
-        //~                               of modes per shell grows as k^(dim-1), so individual
-        //~                               modes still get weaker with k.
-        //~   spectral_slope = dim - 1 -> weight_exp = -1 exactly, a_k ~ 1/k, |b_m| = const:
-        //~                               equal energy in every MODE. That is +1 in 2D and +2 in
-        //~                               3D, and it is what iPIC3D's AlfvTurb2D does.
-        //~                               NB dim is the K-SPACE dimension, so turb_kplane moves it.
-        const double weight_exp = 0.5 * ((double)spectral_slope - dim - 1.0);
+        //~   shell_spectrum_slope = 0       -> E(k) = const: equal energy in each |k| SHELL. The number
+        //~                                     of modes per shell grows as k^(dim-1), so individual
+        //~                                     modes still get weaker with k.
+        //~   shell_spectrum_slope = dim - 1 -> weight_exp = -1 exactly, a_k ~ 1/k, |b_m| = const:
+        //~                                     equal energy in every MODE. That is +1 in 2D and +2 in
+        //~                                     3D, and it is what iPIC3D's AlfvTurb2D does.
+        //~                                     NB dim is the K-SPACE dimension, so turb_kplane moves it.
+        const double weight_exp = 0.5 * ((double)shell_spectrum_slope - dim - 1.0);
 
         const int nx_range = vary_x ? kmax : 0;
         const int ny_range = vary_y ? kmax : 0;
@@ -1008,7 +1010,7 @@ namespace user
         const real_t    B_guide;                //* guide field along x3, setup.B_guide (0 -> zero-mean-field turbulence) in code B units
         const real_t    B_perturbed_rms;        //* RMS |B_perturbed|, setup.B_perturbed_rms in code B units
         const int       kmin, kmax;             //* mode-number band (inclusive)
-        const real_t    spectral_slope;         //* E(k) ~ k^spectral_slope, shell spectrum (0 default = flat)
+        const real_t    energy_spectrum_slope;  //* E(k) ~ k^energy_spectrum_slope, shell spectrum (0 default = flat)
         const long long B_seed;                 //* phases of B_perturbed
         const long long v_seed;                 //* phases of u_perturbed; MUST differ from B_seed
         const int       turb_kplane;            //* k-space restriction: -1 = 3D, 0 = x1x2, 1 = x2x3, 2 = x3x1
@@ -1132,7 +1134,7 @@ namespace user
 
             g.B_perturbed_rms_component = init_turbulence(g.Lx, g.Ly, g.Lz, is_3d, g.B_perturbed_rms,
                                                           g.kmin, g.kmax, g.B_seed,
-                                                          g.spectral_slope, g.turb_kplane, g.turb_a_axis,
+                                                          g.energy_spectrum_slope, g.turb_kplane, g.turb_a_axis,
                                                           g.turb_rand_amp, { cell_dx, cell_dy, cell_dz }, g.B_perturbed_modes_host);
 
             g.AMP = SQR(g.skindepth0) / g.larmor0;      //* AMP = d0^2/r0 = d0 sqrt(sigma0)
@@ -1185,7 +1187,7 @@ namespace user
                 g.u_perturbed_rms           = u_perturbed_rms_target;
                 g.u_perturbed_rms_component = init_turbulence(g.Lx, g.Ly, g.Lz, is_3d, u_perturbed_rms_target,
                                                               g.kmin, g.kmax, g.v_seed,
-                                                              g.spectral_slope, g.turb_kplane, g.turb_a_axis,
+                                                              g.energy_spectrum_slope, g.turb_kplane, g.turb_a_axis,
                                                               g.turb_rand_amp, { 0.0, 0.0, 0.0 }, g.u_perturbed_modes_host);
             }
 
@@ -1443,17 +1445,29 @@ namespace user
             return N_PER_SP * enthalpy_per_particle(mass_1, temperature_1_) + N_PER_SP * enthalpy_per_particle(mass_2, temperature_2_);
         }
 
-        //? setup.spectral_slope: slope of the shell spectrum E(k) ~ k^spectral_slope, default 0 (flat).
-        //? The old key setup.spectral_index (E ~ k^-p, i.e. spectral_index = -spectral_slope) is refused,
-        //? so an old input file cannot silently produce the opposite spectrum.
-        static auto read_spectral_slope(const SimulationParams& p) -> real_t
+        static auto read_real_setting(const SimulationParams& p, const std::string& key, real_t default_value) -> real_t
         {
-            const real_t old_spectral_index = p.template get<real_t>("setup.spectral_index", std::numeric_limits<real_t>::quiet_NaN());
-            raise::ErrorIf(!std::isnan((double)old_spectral_index),
-                           "setup.spectral_index has been replaced by setup.spectral_slope = -spectral_index, the slope of "
-                           "E(k) ~ k^spectral_slope (e.g. spectral_index = 1.6667 -> spectral_slope = -1.6667; "
-                           "spectral_index = -1 -> spectral_slope = 1).", HERE);
-            return p.template get<real_t>("setup.spectral_slope", ZERO);
+            if (!p.contains(key)) { return p.template get<real_t>(key, default_value); }
+            const std::any& value = p.allVars().at(key);
+            if (value.type() == typeid(int)) { return static_cast<real_t>(std::any_cast<int>(value)); }
+            return p.template get<real_t>(key);
+        }
+
+        static auto read_required_real_setting(const SimulationParams& p, const std::string& key, const std::string& description) -> real_t
+        {
+            raise::ErrorIf(!p.contains(key), key + " is required in the input: " + description, HERE);
+            return read_real_setting(p, key, ZERO);
+        }
+
+        static auto read_integer_setting(const SimulationParams& p, const std::string& key, int default_value) -> int
+        {
+            if (!p.contains(key)) { return p.template get<int>(key, default_value); }
+            const std::any& value = p.allVars().at(key);
+            if (value.type() == typeid(int)) { return std::any_cast<int>(value); }
+            const real_t real_value = p.template get<real_t>(key);
+            raise::ErrorIf(std::floor((double)real_value) != (double)real_value,
+                           key + " must be a whole number, but the input gives " + std::to_string((double)real_value), HERE);
+            return static_cast<int>(real_value);
         }
 
         static auto species_mass(Metadomain<S, M>& m, std::size_t idx) -> real_t
@@ -1473,39 +1487,39 @@ namespace user
         }
 
         PGen(const SimulationParams& p, Metadomain<S, M>& m) :
-            params { p }, metadomain { m },
-            larmor0           { p.template get<real_t>("scales.larmor0") },
-            skindepth0        { p.template get<real_t>("scales.skindepth0") },
-            sp1_mass          { species_mass(m, 0) },
-            sp2_mass          { species_mass(m, 1) },
-            sp1_charge        { species_charge(m, 0) },
-            sp2_charge        { species_charge(m, 1) },
-            mass_ratio        { sp2_mass / sp1_mass },
-            sigma0            { (skindepth0 / larmor0) * (skindepth0 / larmor0) },
-            B_guide           { p.template get<real_t>("setup.B_guide", (real_t)1.0) },
-            B_perturbed_rms   { p.template get<real_t>("setup.B_perturbed_rms", (real_t)1.0) },
-            kmin              { p.template get<int>("setup.kmin", 1) },
-            kmax              { p.template get<int>("setup.kmax", 4) },
-            spectral_slope    { read_spectral_slope(p) },
-            B_seed            { static_cast<long long>(p.template get<int>("setup.B_seed", 12345)) },
-            v_seed            { static_cast<long long>(p.template get<int>("setup.v_seed", 67890)) },
-            turb_kplane       { p.template get<int>("setup.turb_kplane", (D == Dim::_3D) ? -1 : 0) },
-            turb_a_axis       { p.template get<int>("setup.turb_a_axis", -1) },
-            turb_rand_amp     { p.template get<bool>("setup.turb_rand_amp", true) },
-            temperature       { p.template get<real_t>("setup.temperature", (real_t)0.01) },
-            temperature_ratio { p.template get<real_t>("setup.temperature_ratio", (real_t)1.0) },
-            perturb_velocity  { p.template get<bool>("setup.perturb_velocity", true) },
-            u_total_cap       { p.template get<real_t>("setup.u_total_cap", (real_t)0.7) },
-            xmin              { m.mesh().extent(in::x1).first },
-            xmax              { m.mesh().extent(in::x1).second },
-            ymin              { m.mesh().extent(in::x2).first },
-            ymax              { m.mesh().extent(in::x2).second },
-            zmin              { (D == Dim::_3D) ? m.mesh().extent(in::x3).first : (real_t)0.0 },
-            zmax              { (D == Dim::_3D) ? m.mesh().extent(in::x3).second : (real_t)1.0 },
-            Lx                { xmax - xmin },
-            Ly                { ymax - ymin },
-            Lz                { zmax - zmin },
-            init_flds         { make_init(*this) } { print_setup(); }
+            params                { p }, metadomain { m },
+            larmor0               { p.template get<real_t>("scales.larmor0") },
+            skindepth0            { p.template get<real_t>("scales.skindepth0") },
+            sp1_mass              { species_mass(m, 0) },
+            sp2_mass              { species_mass(m, 1) },
+            sp1_charge            { species_charge(m, 0) },
+            sp2_charge            { species_charge(m, 1) },
+            mass_ratio            { sp2_mass / sp1_mass },
+            sigma0                { (skindepth0 / larmor0) * (skindepth0 / larmor0) },
+            B_guide               { read_real_setting(p, "setup.B_guide", (real_t)1.0) },
+            B_perturbed_rms       { read_real_setting(p, "setup.B_perturbed_rms", (real_t)1.0) },
+            kmin                  { read_integer_setting(p, "setup.kmin", 1) },
+            kmax                  { read_integer_setting(p, "setup.kmax", 4) },
+            energy_spectrum_slope { read_required_real_setting(p, "setup.spectral_slope", "slope of the shell spectrum E(k) ~ k^spectral_slope (0 = flat, -5/3 = Kolmogorov)") },
+            B_seed                { static_cast<long long>(read_integer_setting(p, "setup.B_seed", 12345)) },
+            v_seed                { static_cast<long long>(read_integer_setting(p, "setup.v_seed", 67890)) },
+            turb_kplane           { read_integer_setting(p, "setup.turb_kplane", (D == Dim::_3D) ? -1 : 0) },
+            turb_a_axis           { read_integer_setting(p, "setup.turb_a_axis", -1) },
+            turb_rand_amp         { p.template get<bool>("setup.turb_rand_amp", true) },
+            temperature           { read_real_setting(p, "setup.temperature", (real_t)0.01) },
+            temperature_ratio     { read_real_setting(p, "setup.temperature_ratio", (real_t)1.0) },
+            perturb_velocity      { p.template get<bool>("setup.perturb_velocity", true) },
+            u_total_cap           { read_real_setting(p, "setup.u_total_cap", (real_t)0.7) },
+            xmin                  { m.mesh().extent(in::x1).first },
+            xmax                  { m.mesh().extent(in::x1).second },
+            ymin                  { m.mesh().extent(in::x2).first },
+            ymax                  { m.mesh().extent(in::x2).second },
+            zmin                  { (D == Dim::_3D) ? m.mesh().extent(in::x3).first : (real_t)0.0 },
+            zmax                  { (D == Dim::_3D) ? m.mesh().extent(in::x3).second : (real_t)1.0 },
+            Lx                    { xmax - xmin },
+            Ly                    { ymax - ymin },
+            Lz                    { zmax - zmin },
+            init_flds             { make_init(*this) } { print_setup(); }
 
         //? Startup diagnostics; all lengths in code units (d0)
         void print_setup()
@@ -1517,6 +1531,7 @@ namespace user
             const std::string sp2     = is_pair ? "positron" : "ion";
             const std::string sp2s    = is_pair ? "positrons" : "ions";
             const std::string SP2u    = is_pair ? "Positrons" : "Ions";
+            const std::string sp2_tag = is_pair ? "e+" : "i";              //* subscript of omega_p for species 2
             const std::string title   = is_pair ? "Decaying turbulence (pair plasma)"
                                                 : "Decaying turbulence (ion-electron plasma)";
 
@@ -1555,6 +1570,10 @@ namespace user
             //!     d_s        = d0 sqrt(m_s <g_s> / n_s) = d0 sqrt(2 m_s <g_s>)   (relativistic inertia)
             //!     lambda_D,s = d0 sqrt(T_s / n_s)       = d0 sqrt(2 T_s)        (Boltzmann screening: no <g_s>)
             //!
+            //! The Debye length is already the full thermal value: the Boltzmann factor exp(-q phi / T) is exact for a
+            //! relativistic Maxwellian, so there is no inertia factor to add (equivalently, lambda_D = v_th / omega_p and
+            //! the 1/sqrt(<g>) of both cancels).
+            //!
             //! Collective values follow from 1/x^2 = sum_s 1/x_s^2. The grid criterion
             //! below is applied to the collective Debye length, because the finite-grid
             //! instability aliases the TOTAL charge density.
@@ -1571,27 +1590,34 @@ namespace user
             const real_t lambda_Dpl = (real_t)(1.0 / std::sqrt(1.0 / SQR((double)lambda_D1) +
                                                                1.0 / SQR((double)lambda_D2)));
 
-            //* gyroradius at gamma = sigma, the usual acceleration ceiling: must
-            //* stay well inside the box or the spectrum is cut by confinement
-            const real_t rho_sigma = larmor0 * sigma_cold / B_ref;
+            //* electron gyroradius at gamma = 1 + sigma_hot: for sigma >> 1 this is the usual acceleration ceiling gamma ~ sigma,
+            //* and it stays defined for sigma < 1 (gamma = sigma alone would be below 1). Must stay well inside the box.
+            const real_t gamma_sigma = ONE + sigma_hot;
+            const real_t u_sigma     = (real_t)std::sqrt(std::max(0.0, (double)(gamma_sigma * gamma_sigma - ONE)));
+            const real_t rho_sigma   = larmor0 * u_sigma * sp1_mass / B_ref;
 
             //* shortest box side among the directions the spectrum spans
             real_t L_min = std::numeric_limits<real_t>::max();
             if (turb_kplane != 1) L_min = std::min(L_min, Lx);   //* x1 active unless k in x2-x3
             if (turb_kplane != 2) L_min = std::min(L_min, Ly);   //* x2 active unless k in x3-x1
             if ((D == Dim::_3D) && (turb_kplane != 0)) L_min = std::min(L_min, Lz);
-            const real_t l_outer = L_min / (real_t)kmin;                   //* largest eddy [d0]
-            const real_t l_inner = L_min / (real_t)kmax;                   //* smallest injected eddy
+            const real_t l_outer = L_min / (real_t)kmin;                   //* largest driven wavelength [d0]
+            const real_t l_inner = L_min / (real_t)kmax;                   //* smallest driven wavelength [d0]
             const real_t B_perturbed_over_guide = (B_guide != ZERO) ? B_perturbed_rms / math::abs(B_guide) : (real_t)-1.0;
 
-            //* outer-scale eddy turnover t = ell / u_perturbed_rms, ell = L/kmin (wavelength convention,
-            //* = 2 pi / k_min), with the u_perturbed actually loaded (the Alfven target if perturb_velocity = false)
+            //* outer-scale eddy turnover t = 1 / (k_min u_perturbed_rms), k_min = 2 pi kmin / L = 2 pi / l_outer,
+            //* with the u_perturbed actually loaded (the Alfven target if perturb_velocity = false)
             const real_t u_eddy  = (u_perturbed_rms > ZERO) ? u_perturbed_rms : u_perturbed_rms_alfven;
-            const real_t t_eddy  = (u_eddy > ZERO) ? l_outer / u_eddy : ZERO;
+            const real_t k_outer = (real_t)(2.0 * std::acos(-1.0)) / l_outer;
+            const real_t t_eddy  = (u_eddy > ZERO) ? ONE / (k_outer * u_eddy) : ZERO;
 
-            const real_t runtime = params.template get<simtime_t>("simulation.runtime");
-            const real_t t_w1    = runtime * (real_t)std::sqrt((double)(N_PER_SP / sp1_mass)); //* [1/omega_p,sp1], omega_p,s = omega_p0 sqrt(n_s / m_s)
-            const real_t t_w2    = runtime * (real_t)std::sqrt((double)(N_PER_SP / sp2_mass)); //* [1/omega_p,sp2]
+            const real_t runtime    = params.template get<simtime_t>("simulation.runtime");
+            //* plasma frequencies of the plasma as a whole (TOTAL density n0, species mass):
+            //*     omega_p,s = omega_p0 / sqrt(m_s <g_s>)  (hot),   omega_p0 / sqrt(m_s)  (cold),   omega_p0 = c / d0
+            const real_t t_wp1_hot  = runtime / (real_t)std::sqrt((double)(sp1_mass * g1));    //* [1/omega_p,e]
+            const real_t t_wp2_hot  = runtime / (real_t)std::sqrt((double)(sp2_mass * g2));    //* [1/omega_p,sp2]
+            const real_t t_wp1_cold = runtime / (real_t)std::sqrt((double)sp1_mass);
+            const real_t t_wp2_cold = runtime / (real_t)std::sqrt((double)sp2_mass);
             const real_t t_cross = runtime / L_min;                                           //* light crossings
             const real_t n_eddy  = (t_eddy > (real_t)0.0) ? runtime / t_eddy : (real_t)0.0;
 
@@ -1735,6 +1761,7 @@ namespace user
             double peak_u_total_loaded = 0.0;                           //* max |u_perturbed + u_drift_species| with the drift as loaded
             double rho_analytic_sq = 0.0;                               //* (AMP div(E) / n)^2 from the analytic div(E) the convection term uses
             double perp_reduction_sum = 0.0, perp_reduction_max = 0.0;  //* f = sigma_local / (1 + sigma_local)
+            double flow_lorentz_sum_1 = 0.0, flow_lorentz_sum_2 = 0.0;  //* Gamma of u_perturbed + u_drift_species, for the lab-frame <gamma>
 
             //* current budget at t = 0:  required current A = AMP curl(B) = particle drift + convection + displacement, at every point [n0 e c]
             double required_sq = 0.0, drift_dot_required = 0.0, convection_dot_required = 0.0, displacement_dot_required = 0.0;   //* projections on A: these add up
@@ -1802,6 +1829,14 @@ namespace user
                         for (const double u_drift_coeff_s : { (double)u_drift_coeff_1, (double)u_drift_coeff_2 })
                         {
                             peak_u_total_loaded = std::max(peak_u_total_loaded, std::sqrt(SQR(u_perturbed_x + u_drift_coeff_s * loaded_current_x) + SQR(u_perturbed_y + u_drift_coeff_s * loaded_current_y) + SQR(u_perturbed_z + u_drift_coeff_s * loaded_current_z)));
+                        }
+
+                        //* bulk Lorentz factor of each species' flow, Gamma = 1 / sqrt(1 - u^2) (u is a three-velocity [c]; kept below the 0.99c clamp)
+                        {
+                            const double u_total_sq_1 = SQR(u_perturbed_x + (double)u_drift_coeff_1 * loaded_current_x) + SQR(u_perturbed_y + (double)u_drift_coeff_1 * loaded_current_y) + SQR(u_perturbed_z + (double)u_drift_coeff_1 * loaded_current_z);
+                            const double u_total_sq_2 = SQR(u_perturbed_x + (double)u_drift_coeff_2 * loaded_current_x) + SQR(u_perturbed_y + (double)u_drift_coeff_2 * loaded_current_y) + SQR(u_perturbed_z + (double)u_drift_coeff_2 * loaded_current_z);
+                            flow_lorentz_sum_1 += 1.0 / std::sqrt(1.0 - std::min(u_total_sq_1, 0.9801));
+                            flow_lorentz_sum_2 += 1.0 / std::sqrt(1.0 - std::min(u_total_sq_2, 0.9801));
                         }
 
                         //* current budget:  A = AMP curl(B) = particle drift (AMP J_loaded) + convection (rho u_convection) + displacement (AMP dE/dt)
@@ -1898,6 +1933,9 @@ namespace user
             const double u_drift_mean_1     = u_drift_sum_1   * inv_n;
             const double u_drift_mean_2     = u_drift_sum_2   * inv_n;
             const double u_perturbed_mean   = u_perturbed_sum * inv_n;
+            //* lab-frame mean Lorentz factor: an isotropic rest-frame distribution boosted by Gamma has <gamma_lab> = Gamma <g>
+            const double gamma_lab_1        = flow_lorentz_sum_1 * inv_n * (double)g1;
+            const double gamma_lab_2        = flow_lorentz_sum_2 * inv_n * (double)g2;
             const double rho_rms            = std::sqrt(rho_sq * inv_n);
             const double rho_analytic_rms   = std::sqrt(rho_analytic_sq * inv_n);
             const double xi_rms             = std::sqrt(xi_sq  * inv_n);
@@ -1912,6 +1950,8 @@ namespace user
             const double correction_size    = (curl_B_sq_sum > 0.0) ? std::sqrt(current_correction_sq / curl_B_sq_sum) : 0.0;    //* RMS |J_first_order - curl B| / RMS |curl B|
             const double convection_size    = (curl_B_sq_sum > 0.0) ? std::sqrt(convection_correction_sq / curl_B_sq_sum) : 0.0; //* RMS |J_loaded - J_first_order| / RMS |curl B|
             const double perp_reduction_mean = perp_reduction_sum * inv_n;
+            //* actual bulk-kinetic / magnetic perturbation energy, (w u^2 / 2) / (sigma0 dB^2 / 2) for a non-relativistic flow; s^2 is this ratio only in Alfven units
+            const double bulk_to_magnetic   = (B_perturbed_rms > ZERO) ? (double)w_enth * SQR((double)u_perturbed_rms) / ((double)sigma0 * SQR((double)B_perturbed_rms)) : 0.0;
             //* values along A [n0 e c]: <X . A> / A_rms, so particle drift + convection + displacement = A_rms exactly
             const double required_rms             = std::sqrt(required_sq * inv_n);
             const double drift_along              = (required_rms > 0.0) ? drift_dot_required * inv_n / required_rms : 0.0;
@@ -2131,8 +2171,8 @@ namespace user
                     << kv1("Box (Lx x Ly) [d0]") << Lx << " x " << Ly << "\n";
             }
             oss << kv1("Grid size [d0]") << dx << "\n"
-                << kv1("Runtime [cold electron freq.]") << t_w1 << "\n"
-                << kv1("Runtime [cold " + sp2 + " freq.]") << t_w2 << "\n"
+                << kv1("Runtime [omega_p,e t] (n0 total)") << t_wp1_hot << "  (hot; cold = " << t_wp1_cold << ")\n"
+                << kv1("Runtime [omega_p," + sp2_tag + " t] (n0 total)") << t_wp2_hot << "  (hot; cold = " << t_wp2_cold << ")\n"
                 << kv1("Runtime [L/c]") << t_cross << "\n"
                 << kv1("Runtime [outer eddy times]") << n_eddy << "\n\n"
 
@@ -2154,8 +2194,10 @@ namespace user
                 << kv1("Enthalpy w [n0 m0 c^2]") << w_enth << "  (= sum_s n_s (m_s <g_s> + T_s))\n"
                 << kv1("Alfven speed [c] (cold)") << vA_cold << "\n"
                 << kv1("Alfven speed [c] (hot)") << vA_hot << "\n"
-                << kv1("Mean Lorentz factor electrons") << g1 << "\n"
-                << kv1("Mean Lorentz factor " + sp2s) << g2 << "\n"
+                << kv1("Mean Lorentz factor electrons (fluid)") << g1 << "  (thermal, fluid frame)\n"
+                << kv1("Mean Lorentz factor electrons (lab)") << gamma_lab_1 << "  (with bulk flow and drift)\n"
+                << kv1("Mean Lorentz factor " + sp2s + " (fluid)") << g2 << "  (thermal, fluid frame)\n"
+                << kv1("Mean Lorentz factor " + sp2s + " (lab)") << gamma_lab_2 << "  (with bulk flow and drift)\n"
                 << "\tPlasma beta (at B_rms)\n"
                 << kv2("Electrons") << beta_1_rms << "\n"
                 << kv2(SP2u) << beta_2_rms << "\n"
@@ -2178,13 +2220,13 @@ namespace user
                 << "TURBULENCE SPECTRUM \n"
                 << kv1("Mode band [kmin, kmax]") << "[" << kmin << ", " << kmax << "]\n"
                 << kv1("Number of modes") << B_perturbed_modes_host.size() << "\n"
-                << kv1("Spectral slope (E(k) ~ k^slope)") << spectral_slope << "  (0 = flat; equal energy per mode at " << kspace_dim(turb_kplane, D == Dim::_3D) - 1 << ")\n"
+                << kv1("Spectral slope (E(k) ~ k^slope)") << energy_spectrum_slope << "  (0 = flat shell spectrum E(k); slope " << kspace_dim(turb_kplane, D == Dim::_3D) - 1 << " = equal energy per mode)\n"
                 << kv1("Random mode amplitudes") << (turb_rand_amp ? "YES" : "NO") << "\n"
                 << kv1("k-space") << kplane_name << "\n"
                 << kv1("Vector potential") << apol_name << "\n"
-                << kv1("Outer scale L/kmin [d0]") << l_outer << "  (" << l_outer / d_plasma << " plasma skin depths)\n"
-                << kv1("Inner scale L/kmax [d0]") << l_inner << "  (resolved with " << l_inner / dx << " cells)\n"
-                << kv1("Eddy time L/(kmin u_perturbed_rms)") << t_eddy << "  [d0/c]" << ((u_perturbed_rms > ZERO) ? "" : "  (Alfven target; no flow loaded)") << "\n\n"
+                << kv1("Largest driven scale L/kmin [d0]") << l_outer << "  (wavelength; " << l_outer / d_plasma << " plasma skin depths)\n"
+                << kv1("Smallest driven scale L/kmax [d0]") << l_inner << "  (wavelength; resolved with " << l_inner / dx << " cells)\n"
+                << kv1("Eddy time 1/(k_min u_perturbed_rms)") << t_eddy << "  [d0/c]  (k_min = 2 pi kmin / L)" << ((u_perturbed_rms > ZERO) ? "" : "  (Alfven target; no flow loaded)") << "\n\n"
 
 
                 << "CURRENT \n"  
@@ -2220,7 +2262,8 @@ namespace user
                     << kv2("mean |u_perturbed| [c]") << u_perturbed_mean << "\n"
                     << kv1("u_perturbed RMS (X, Y, Z) [c]") << "(" << u_perturbed_rms_component[0] << ", " << u_perturbed_rms_component[1] << ", " << u_perturbed_rms_component[2] << ")\n"
                     << kv1("Cap factor s") << u_perturbed_cap_factor << ((u_perturbed_cap_factor < ONE) ? "  (u_perturbed REDUCED below the Alfven target)" : "  (Alfven target loaded)") << "\n"
-                    << kv1("Turbulent kinetic/magnetic energy") << (double)(u_perturbed_cap_factor * u_perturbed_cap_factor) << "  (= s^2, Alfven units; 1 = equipartition)\n";
+                    << kv1("Turbulent kinetic/magnetic energy") << (double)(u_perturbed_cap_factor * u_perturbed_cap_factor) << "  (= s^2, Alfven units; 1 = equipartition)\n"
+                    << kv1("Bulk kinetic / magnetic energy") << bulk_to_magnetic << "  (actual ratio w u^2 / (sigma0 dB^2), non-relativistic; motional E^2 holds most of the rest)\n";
                 if (sigma_c_valid) { oss << kv1("Cross-helicity, sigma_c") << sigma_c << "  (0 on average over seeds)\n"; }
                 else               { oss << kv1("Cross-helicity, sigma_c") << "n/a\n"; }
             }
@@ -2254,7 +2297,7 @@ namespace user
             }
 
 
-            oss << "CHARACTERISTIC SCALES\n"
+            oss << "CHARACTERISTIC SCALES (hot: inertia m <g>; Debye lengths need no inertia factor)\n"
                 << "\tPlasma (as a whole)\n"
                 << kv2("Skin depth") << d_plasma << "  (resolved with " << d_plasma / dx << " cells)\n"
                 << kv2("Debye length") << lambda_Dpl << "  (resolved with " << lambda_Dpl / dx << " cells; "
@@ -2270,7 +2313,7 @@ namespace user
                 << kv2("Larmor radius") << rho_2 << "  (resolved with " << rho_2 / dx << " cells)\n"
                 << kv2("Debye length") << lambda_D2 << "  (resolved with " << lambda_D2 / dx << " cells)\n"
                 << "\tConfinement\n"
-                << kv2("Larmor radius at Lorentz factor = sigma") << rho_sigma << "  (" << rho_sigma / L_min << " x box)\n\n"
+                << kv2("Larmor radius at gamma = 1 + sigma_hot") << rho_sigma << "  (" << rho_sigma / L_min << " x box)\n\n"
 
 
                 << "TEMPERATURES\n"
