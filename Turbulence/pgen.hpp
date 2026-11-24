@@ -8,7 +8,7 @@
 #include "utils/numeric.h"
 #include "arch/kokkos_aliases.h"
 
-//! Assumes an MPI build (Entity sets -D MPI_ENABLED with -D mpi=ON)
+//! Requires an MPI build (-D mpi=ON defines MPI_ENABLED)
 #if !defined(MPI_ENABLED)
     #error "This pgen requires an MPI build: configure Entity with -D mpi=ON"
 #endif
@@ -16,11 +16,11 @@
 #include <mpi.h>
 
 #include "archetypes/utils.h"
+#include "kernels/divergences.hpp"
 #include "archetypes/energy_dist.h"
 #include "archetypes/spatial_dist.h"
 #include "framework/domain/metadomain.h"
 #include "archetypes/particle_injector.h"
-#include "kernels/divergences.hpp"
 
 #include <any>
 #include <array>
@@ -33,105 +33,84 @@
 #include <fstream>
 #include <sstream>
 #include <iomanip>
-#include <algorithm>
 #include <typeinfo>
+#include <algorithm>
 
 //! =============================================================================
 //!  PROBLEM DESCRIPTION
 //!
-//!  Decaying turbulence in a uniform, collisionless two-species plasma 
-//!  (electron-positron or electron-ion), relativistic or non-relativistic, in 2D or 3D
-//!
-//!  BOUNDARIES: periodic in every direction
+//!  Decaying turbulence in a uniform, collisionless two-species plasma (electron-positron or 
+//! electron-ion), relativistic or non-relativistic, in 2D or 3D. Periodic in every direction.
 //!
 //!  INITIAL STATE (t = 0)
-//!   - Magnetic field: B = B_guide z + B_perturbed. B_perturbed is a sum of solenoidal
-//!     Fourier modes with mode numbers kmin <= |n| <= kmax (k = 2 pi n / L), shell spectrum
-//!     E(k) ~ k^spectral_slope, random phases and an exact RMS. The amplitudes use the Yee-matched
-//!     wavenumber k~, so div(B) = 0 on the grid.
-//!   - Flow: u_perturbed, built the same way with independent phases (v_seed). Its RMS
-//!     follows the relativistic Alfven relation (B_perturbed_rms / B_rms) vA, scaled by
-//!     s <= 1 so that each species stays below u_total_cap.
-//!   - Particles: uniform density n_s = n0/2 per species, Maxwell-Juttner at T_s, drifting
-//!     at u_perturbed + u_drift_species. The thermal spread is an exact Maxwell-Juttner sample at
-//!     every temperature (TurbCurrentDist::thermal_sample), and <gamma_s> is computed exactly. The drifts carry the current J (see
-//!     InitFields::loaded_current), shared between the species by enthalpy at zero net
-//!     momentum.
-//!   - Electric field: E = -(u_motional x B), where u_motional is the field-line velocity
-//!     (u_perturbed, plus the Hall part when the two species differ).
-//!   - Charge: the polarisation charge rho = AMP div(E) is loaded by displacing the two
-//!     species in opposite directions along E; velocities are then redrawn at the
-//!     displaced positions.
-//!   - Startup printout, also written to <simulation.name>/Simulation_params.txt: scales,
-//!     spectrum, speeds, current, consistency checks and a Gauss-law check of the charge.
+//!   - B = B_guide z + B_perturbed. B_perturbed: solenoidal Fourier modes, kmin <= |n| <= kmax (k = 2 pi n / L),
+//!     shell spectrum E(k) ~ k^spectral_slope, random phases, exact RMS. Amplitudes use the Yee-matched k~, so div(B) = 0 on the grid.
+//!   - Flow u_perturbed: same construction, independent phases (v_seed). RMS = (B_perturbed_rms / B_rms) vA (relativistic),
+//!     scaled by s <= 1 so that each species stays below u_total_cap [< c].
+//!   - Particles: uniform n_s = n_tot/2, exact Maxwell-Juttner at T_s, drifting at u_perturbed + u_drift_species.
+//!     The drifts carry J (InitFields::loaded_current), shared between the species by enthalpy at zero net momentum.
+//!   - E = -(u_motional x B), u_motional = field-line velocity (u_perturbed, plus the Hall part when the species differ).
+//!   - Charge rho = AMP div(E), loaded by displacing the two species in opposite directions along E;
+//!     velocities are redrawn at the displaced positions.
+//!   - Startup printout, also written to <simulation.name>/Simulation_params.txt, followed by a Gauss-law check.
 //!
-//!  INPUTS
-//!     B_guide                         Guide field along Z [B0]
-//!     B_perturbed_rms                 RMS |B_perturbed| [B0]
+//!  INPUTS ([setup]; fields in code units)
+//!     B_guide                         Guide field along Z
+//!     B_perturbed_rms                 RMS |B_perturbed|
 //!     kmin, kmax                      mode-number band, k = 2 pi n / L
-//!     spectral_slope                  slope of the shell spectrum E(k) ~ k^spectral_slope
-//!                                     0 = flat, -5/3 = Kolmogorov
-//!     B_seed, v_seed                  Phase seeds of B_perturbed and u_perturbed; must differ
+//!     spectral_slope                  E(k) ~ k^spectral_slope; 0 = flat, -5/3 = Kolmogorov
+//!     B_seed, v_seed                  phase seeds of B_perturbed and u_perturbed; must differ
 //!     turb_kplane                     k-space: -1 = 3D, 0 = X-Y, 1 = Y-Z, 2 = Z-X
-//!     turb_a_axis                     vector potential: -1 = random _|_ k, 0/1/2 = X/Y/Z
-//!                                     (2 in 2D gives B_perturbed in the X-Y plane)
+//!     turb_a_axis                     vector potential: -1 = random _|_ k, 0/1/2 = X/Y/Z (2 in 2D gives B_perturbed in the X-Y plane)
 //!     turb_rand_amp                   Gaussian random mode amplitudes
-//!     temperature                     Species-1 temperature kT_1 / (m0 c^2)
+//!     temperature                     species-1 temperature kT_1 / (m0 c^2)
 //!     temperature_ratio               T_2 / T_1
-//!     perturb_velocity                Load u_perturbed
-//!     u_total_cap                     Cap on each species' total speed [c], in (0, 0.99)
+//!     perturb_velocity                load u_perturbed
+//!     u_total_cap                     cap on each species' total speed [c], in (0, 0.99)
 //!
 //! =============================================================================
 //!
 //!  LIMITATIONS
 //!
 //!  NON-RELATIVISTIC  (sigma_h < 0.1; for ion-electron also vA_e = sqrt(m_i/m_e) vA << c)
-//!   - Particle noise: the current drift and the polarisation charge are small against
-//!     thermal noise. No quiet start; both species share ppc0 (Entity allows no particle
-//!     weights in Cartesian coordinates). The Gauss-law check is noise-dominated here.
-//!   - E is first order in the drifts (electron inertia omitted): relative size
-//!     ~ (k_max d)^2 B_perturbed/B, d = electron (or pair) skin depth. Keep L/kmax >~ 20-40 d.
-//!   - Ion-electron: the unloaded dE/dt is ~ (k_max d_i)^2 (vA/c)^2 B_perturbed/B,
-//!     negligible while vA_e << c.
-//!   - current_filters > 0 would make the filtered current differ from the loaded J at high k.
+//!   - Particle noise: the current drift and the polarisation charge are small against thermal noise.
+//!     The Gauss-law check is noise-dominated here.
+//!   - E is first order in the drifts (electron inertia omitted): relative size ~ (k_max d)^2 B_perturbed/B,
+//!     d = electron (or pair) skin depth. Keep L/kmax >~ 20-40 d.
+//!   - Ion-electron: the unloaded dE/dt is ~ (k_max d_i)^2 (vA/c)^2 B_perturbed/B, negligible while vA_e << c.
+//!   - current_filters > 0 makes the filtered current differ from the loaded J at high k.
 //!
 //!  RELATIVISTIC  (sigma_h >= 0.1, or B_guide = 0)
-//!   - Loaded (InitFields::loaded_current): the sigma_h split of J and the excess convection
-//!     current of the displaced charge, both evaluated from the first-order fields.
-//!   - NOT loaded, both needing E != 0 -- in a pair plasma only when u_perturbed is loaded
-//!     (or T_1 != T_2), in an ion-electron plasma always (Hall field):
-//!       * the parallel displacement current that keeps E.B = 0 as field lines rotate,
-//!         J_par -> J_par - AMP E.(curl E)/|B|; it grows as (u/c)^2;
-//!       * the advective part of dE_perp/dt, (u.grad)u x B - u x curl(u x B); it grows with vA/c.
-//!     Measured with print_setup for B_perturbed/B ~ 0.4 (RMS fraction of AMP curl(B), advective / parallel):
-//!     ion-electron at sigma_h = 0.02: 1.1% / 0.35%; pair at sigma_h = 1.1: 12-17% / 6-8% (kmax = 2-4);
-//!     pair at sigma_h = 11: 21% / 10%.
-//!     Both scale with s^2 when the u_total cap acts. Expect an initial transient of these
-//!     sizes and measure it before trusting early times. print_setup estimates both from the
-//!     loaded fields (UNLOADED DISPLACEMENT CURRENT AT t = 0).
-//!   - The u_total cap uses the first-order current; print_setup reports the peak speed with
-//!     the convection term and warns if it exceeds the cap.
-//!   - Current starvation: the field-aligned current is carried in full, so a high sigma0
-//!     with a large k_max d0 can exceed the cap (abort). Lower kmax or skindepth0.
-//!   - Charge displacements of several cells at sigma_h ~ 1 limit the number of ranks per
-//!     direction (guarded in load_charge_density).
-//!   - Ion-electron: the sigma_h split uses the MHD inertia w, approximate at sub-ion scales,
-//!     and the Hall part of curl(u_motional) ignores the sigma_h split.
-//!   - 3D: the sigma_h split covers k_par != 0 at first order, but 3D is untested.
+//!   - Loaded: E = -(u_motional x B), including the Hall field (InitFields::motional_E), and its charge rho = AMP div(E)
+//!     (load_charge_density); in J (InitFields::loaded_current), the sigma_h split and the excess convection current of the
+//!     displaced charge, both from the first-order fields.
+//!   - NOT loaded: two parts of dE/dt at t = 0. Both exist only when E != 0, (a) in a pair plasma with u_perturbed or T_1 != T_2,
+//!     and (b) always in an ion-electron plasma (the loaded Hall field makes E != 0 even without u_perturbed). With u = u_motional:
+//!       * the parallel displacement current that keeps E.B = 0, J_par -> J_par - AMP E.(curl E)/|B|; grows as (u/c)^2;
+//!       * the advective part of dE_perp/dt, (u.grad)u x B - u x curl(u x B); grows with vA/c.
+//!   - The u_total cap uses the first-order current; print_setup reports the peak speed with the convection term.
+//!   - Current starvation: the field-aligned current is carried in full, so a high sigma0 with a large k_max d0 can exceed the cap (abort).
+//!   - Charge displacements of several cells at sigma_h ~ 1 limit the number of ranks per direction (guarded in load_charge_density).
+//!
+//!  ION-ELECTRON  (mass ratio mu = m_i/m_e; species 1 = electrons)
+//!   - Electrons carry ~ mu/(1 + mu) of J: |u_drift,e| ~ k d_e sqrt(sigma_e) B_perturbed/B with sigma_e ~ mu sigma, so current
+//!     starvation (abort) and electron streaming instabilities (u_drift,e >~ v_th,e) tighten as mu grows.
+//!   - Omega_ce dt = CFL (dx/d0) sqrt(sigma0) |B| / sqrt(D) grows with sigma0 ~ sigma (1 + mu)/2: check it in the printout.
+//!   - The Hall E and its charge displacement grow as AMP^2 = d0^2 sigma0: fewer ranks per direction.
+//!   - The sigma_h split uses the MHD inertia w, approximate below d_i; the Hall part of curl(u_motional) ignores the sigma_h split.
+//!
 //! =============================================================================
 
 namespace user
 {
     using namespace ntt;
 
-    //~ u_perturbed has phases independent of B_perturbed (v_seed != B_seed), so <u_perturbed . B_perturbed> = 0 on AVERAGE over seeds:
-    //~ a BALANCED seed, both Elsasser families z+- excited. For one seed pair the normalised cross-helicity
-    //~ scatters by ~ 1/sqrt(2 N_eff), N_eff = effective number of energy-carrying modes; print_setup reports it.
-    //~ E = -(u_motional x B) at t = 0 (see InitFields::motional_E).
+    //~ u_perturbed has phases independent of B_perturbed (v_seed != B_seed), so <u_perturbed . B_perturbed> = 0 on average over seeds:
+    //~ both Elsasser families z+- are excited. For one seed pair the normalised cross-helicity scatters by ~ 1/sqrt(2 N_eff),
+    //~ N_eff = effective number of energy-carrying modes; print_setup reports it.
 
-    //* Mode m of B_perturbed or u_perturbed: amplitude (bx, by, bz) times cos(k.x + phase). The curl of the
-    //* vector potential is already folded into the amplitudes, so the device kernel is a bare cosine sum.
-    //* kc are the Yee-matched wavenumbers used for curl(B).
+    //* Mode m of B_perturbed or u_perturbed: amplitude (bx, by, bz) times cos(k.x + phase). The curl of the vector potential is
+    //* folded into the amplitudes, so the device kernel is a bare cosine sum. kc are the Yee-matched wavenumbers used for curl(B).
     struct TurbMode
     {
         real_t kx, ky, kz;
@@ -140,8 +119,7 @@ namespace user
         real_t kcx, kcy, kcz;
     };
 
-    //! Dimensionality of k-SPACE is not the dimensionality of the box: a
-    //! plane-restricted spectrum inside a 3D box still has N(k)dk ~ k dk per shell
+    //! Dimensionality of k-SPACE, not of the box: a plane-restricted spectrum in a 3D box still has N(k)dk ~ k dk per shell
     inline auto kspace_dim(int kplane, bool is_3d) -> int
     {
         bool vary_x = true, vary_y = true, vary_z = is_3d;
@@ -152,12 +130,6 @@ namespace user
         return (vary_x ? 1 : 0) + (vary_y ? 1 : 0) + (vary_z ? 1 : 0);
     }
 
-    //* A_m = a_k e_A sin(k.x + ph)  =>  b_m cos(k.x + ph) with b_m = a_k (k x e_A):
-    //* divergence-free by construction, with |b_m| = a_k |k| since e_A _|_ k.
-    //*
-    //* a_k ~ (k/k0)^((shell_spectrum_slope - dim - 1)/2): with N(k)dk ~ k^(dim-1)dk modes per shell this
-    //* yields E(k) ~ k^(dim-1)|b_k|^2 ~ k^shell_spectrum_slope. dim = 2 -> (shell_spectrum_slope - 3)/2, dim = 3 -> (shell_spectrum_slope - 4)/2
-
     //* Yee-matched wavenumber k~ = (2/h) sin(k h/2): the one-cell centred difference of cos(k x) is exactly -k~ sin(k x); h = 0 -> continuum k
     inline auto yee_wavenumber(double k, double h) -> double
     {
@@ -165,7 +137,9 @@ namespace user
     }
 
     //? Solenoidal mode table with total RMS rms_target; returns the per-component RMS.
-    //? cell_size > 0: amplitudes b_m = a_k (k~ x e_A), so k~ . b_m = 0 and the field is exactly divergence-free on the Yee grid; cell_size = 0: continuum k
+    //?   A_m = a_k e_A sin(k.x + ph)  =>  b_m = a_k (k~ x e_A) cos(k.x + ph): k~ . b_m = 0, so div(B) = 0 exactly on the Yee grid.
+    //?   a_k ~ (k/k0)^((shell_spectrum_slope - dim - 1)/2) with N(k)dk ~ k^(dim-1) modes per shell gives E(k) ~ k^shell_spectrum_slope.
+    //? cell_size = 0 -> continuum k (used for u_perturbed).
     inline auto init_turbulence(real_t                 Lx,
                                 real_t                 Ly,
                                 real_t                 Lz,
@@ -190,8 +164,7 @@ namespace user
         std::uniform_real_distribution<double> phase_dist(0.0, 2.0 * M_PI);
         std::normal_distribution<double>       gauss_dist(0.0, 1.0);
 
-        //! In 2D, only the x1-x2 plane is admissible: a mode with k3 != 0 would be
-        //! sampled at x3 = 0 alone, breaking periodicity and the zero divergence
+        //! In 2D only the x1-x2 plane is admissible: a mode with k3 != 0 would be sampled at x3 = 0 alone
         bool vary_x = true, vary_y = true, vary_z = is_3d;
         if      (kplane == 0) { vary_x = true;  vary_y = true;  vary_z = false; }
         else if (kplane == 1) { vary_x = false; vary_y = true;  vary_z = true;  }
@@ -209,20 +182,11 @@ namespace user
         if (vary_z) k0_ref = (k0_ref == 0.0) ? k0z : std::min(k0_ref, k0z);
         if (k0_ref <= 0.0) return zero;
 
-        //! dim is the dimensionality of K-SPACE, not of the simulation
         const double dim = (double)kspace_dim(kplane, is_3d);
 
-        //~ E(k) ~ k^shell_spectrum_slope: the energy summed over a |k| shell, i.e. the slope read off a
-        //~ power-spectrum plot. A shell holds ~ k^(dim-1) modes and |b_m| = a_k |k|, so the energy of
-        //~ ONE mode goes as k^(shell_spectrum_slope - (dim-1)). Two values worth knowing:
-        //~
-        //~   shell_spectrum_slope = 0       -> E(k) = const: equal energy in each |k| SHELL. The number
-        //~                                     of modes per shell grows as k^(dim-1), so individual
-        //~                                     modes still get weaker with k.
-        //~   shell_spectrum_slope = dim - 1 -> weight_exp = -1 exactly, a_k ~ 1/k, |b_m| = const:
-        //~                                     equal energy in every MODE. That is +1 in 2D and +2 in
-        //~                                     3D, and it is what iPIC3D's AlfvTurb2D does.
-        //~                                     NB dim is the K-SPACE dimension, so turb_kplane moves it.
+        //~ Energy of ONE mode goes as k^(shell_spectrum_slope - (dim-1)). Two reference values:
+        //~   shell_spectrum_slope = 0       -> equal energy per |k| SHELL (individual modes still weaken with k)
+        //~   shell_spectrum_slope = dim - 1 -> a_k ~ 1/k, |b_m| = const: equal energy per MODE (+1 in 2D, +2 in 3D; iPIC3D's AlfvTurb2D)
         const double weight_exp = 0.5 * ((double)shell_spectrum_slope - dim - 1.0);
 
         const int nx_range = vary_x ? kmax : 0;
@@ -252,19 +216,17 @@ namespace user
                     const double kcz    = yee_wavenumber(kz, cell_size[2]);
                     const double kc_mag = std::sqrt(kcx * kcx + kcy * kcy + kcz * kcz);
 
-                    double ex, ey, ez;          //* components of e_A, the direction of this mode's vector potential
+                    double ex, ey, ez;          //* e_A, direction of this mode's vector potential
                     if (a_axis >= 0 && a_axis <= 2)
                     {
-                        //* fixed e_A: b_m = a_k (k x e_A) is perpendicular to e_A, so a_axis = 2
-                        //* with k in x1-x2 gives an in-plane mode (b_z = 0), the 2D flux-function setup
+                        //* fixed e_A: b_m _|_ e_A, so a_axis = 2 with k in x1-x2 gives an in-plane mode (2D flux-function setup)
                         ex = (a_axis == 0) ? 1.0 : 0.0;
                         ey = (a_axis == 1) ? 1.0 : 0.0;
                         ez = (a_axis == 2) ? 1.0 : 0.0;
                     }
                     else
                     {
-                        //* project out the k~-parallel part: it drops out of k~ x e
-                        //* anyway, and removing it keeps |b_m| = a_k|k~| exact
+                        //* random e_A with the k~-parallel part projected out, so |b_m| = a_k |k~| exactly
                         double gx = 0.0, gy = 0.0, gz = 0.0, norm = 0.0;
                         int    tries = 0;
                         do
@@ -295,8 +257,7 @@ namespace user
                                                    (real_t)kcx, (real_t)kcy, (real_t)kcz });
                 }
 
-        //~ RMS is EXACT, not sampled: half-space selection means no two modes share
-        //~ +/-k, so cross terms vanish over the box and each component's mean square is 0.5 sum_m b_i,m^2.
+        //~ RMS is EXACT: no two modes share +/-k (half-space), so cross terms vanish over the box and each component's mean square is 0.5 sum_m b_i,m^2
         double s_bx = 0.0, s_by = 0.0, s_bz = 0.0;
         for (const auto& m : modes_out)
         {
@@ -319,8 +280,7 @@ namespace user
         return { (real_t)(std::sqrt(s_bx) * scale), (real_t)(std::sqrt(s_by) * scale), (real_t)(std::sqrt(s_bz) * scale) };
     }
 
-    //~ Host mode sums, shared by the u_total cap (make_init) and the startup
-    //~ diagnostics (print_setup). Both evaluate exactly what the device kernels load.
+    //~ Host mode sums, shared by the u_total cap (make_init) and the startup diagnostics (print_setup); they mirror the device kernels.
 
     //* sum_m a_m cos(k_m.x + phase_m), with a_m the (bx, by, bz) slot of the mode
     inline void host_cos_sum(const std::vector<TurbMode>& modes, double X, double Y, double Z, double& sum_x, double& sum_y, double& sum_z)
@@ -348,7 +308,7 @@ namespace user
         }
     }
 
-    //* sigma_h split on the host (mirrors InitFields::sigma_split): V -> V - f V_perp, f = sigma_local / (1 + sigma_local)
+    //* sigma_h split (mirrors InitFields::sigma_split): V -> V - f V_perp, f = sigma_local / (1 + sigma_local)
     inline void host_sigma_split(double sigma_h_per_B_sq, const double (&B)[3], double (&V)[3])
     {
         if (sigma_h_per_B_sq <= 0.0) { return; }
@@ -428,9 +388,8 @@ namespace user
         current_x = current[0]; current_y = current[1]; current_z = current[2];
     }
 
-    //* Host sampling grid for peak and consistency checks. The fields are band-limited at |n| <= kmax, so
-    //* 16 points per shortest wavelength (8 in 3D) locate peaks to within 1 - cos(pi/16) ~ 2% (8% in 3D).
-    //* Never finer than the simulation grid. Cost ~ (points per side)^dim x (number of modes) ~ kmax^4 in 2D.
+    //* Host sampling grid for peaks and checks. Fields are band-limited at |n| <= kmax, so 16 points per shortest wavelength (8 in 3D)
+    //* locate peaks to within 1 - cos(pi/16) ~ 2% (8% in 3D). Never finer than the simulation grid. Cost ~ kmax^4 in 2D.
     inline auto sampling_points_per_side(int kmax, std::size_t n_cells, bool is_3d) -> int
     {
         const int points_per_wavelength = is_3d ? 8 : 16;
@@ -450,23 +409,11 @@ namespace user
     //~
     //~    u_perturbed(x) = s * sum_m u_m cos(k_m.x + psi_m)
     //~
-    //~  The mean flow is zero (plasma rest frame, no k = 0 mode), so u_perturbed is
-    //~  the whole velocity the two species share. Same solenoidal construction as
-    //~  B_perturbed (u_m = c_k (k x e_A), same band, same spectral slope, same
-    //~  polarisation axis) but from an INDEPENDENT phase set seeded by
-    //~  setup.v_seed. s <= 1 is the u_total cap factor (make_init); it
-    //~  scales every mode alike, so u_perturbed stays solenoidal.
+    //~  Zero mean flow (plasma rest frame). Same solenoidal construction as B_perturbed (same band, slope and polarisation axis)
+    //~  but with INDEPENDENT phases (setup.v_seed). s <= 1 is the u_total cap factor (make_init); it scales every mode alike.
     //~
-    //~  Reusing B_perturbed's seed would reproduce the same phases and the same
-    //~  random amplitudes mode for mode, giving u_perturbed proportional to
-    //~  B_perturbed everywhere: a pure Elsasser state with z- = 0, for which the
-    //~  nonlinear term z-.grad(z+) vanishes identically. That is an exact nonlinear
-    //~  solution of incompressible MHD -- it propagates and does not cascade.
-    //~  Independent phases give <u_perturbed . B_perturbed> = 0 on average over seeds.
-    //~
-    //~  This mirrors iPIC3D's AlfvTurb2D, which keeps rphb (B and J) and
-    //~  rphv (velocity) as separate phase arrays.
-    //~
+    //~  Reusing B_perturbed's seed would give u_perturbed proportional to B_perturbed everywhere: a pure Elsasser state (z- = 0),
+    //~  for which z-.grad(z+) vanishes identically. It is an exact nonlinear solution of incompressible MHD and does not cascade.
     //~ =========================================================================
     template <Dimension D>
     struct TurbVelocity
@@ -480,8 +427,7 @@ namespace user
                      ux { ux }, uy { uy }, uz { uz },
                      ph { ph }, nmodes { nmodes } {}
 
-        //* u_perturbed [c] at x_Ph; identically zero when no modes were built
-        //* (setup.perturb_velocity = false or B_perturbed_rms = 0), leaving u_total_species = u_drift_species.
+        //* u_perturbed [c] at x_Ph; zero when no modes were built (perturb_velocity = false or B_perturbed_rms = 0)
         Inline void operator()(const coord_t<D>& x_Ph, real_t& u_perturbed_x, real_t& u_perturbed_y, real_t& u_perturbed_z) const
         {
             u_perturbed_x = ZERO; u_perturbed_y = ZERO; u_perturbed_z = ZERO;
@@ -570,10 +516,7 @@ namespace user
             return acc;
         }
 
-        //! =========================================================================
         //! MAGNETIC FIELD   B = B_guide (Z) + B_perturbed
-        //! =========================================================================
-
         Inline auto bx1(const coord_t<D>& x_Ph) const -> real_t { return turb(x_Ph, 0); }
         Inline auto bx2(const coord_t<D>& x_Ph) const -> real_t { return turb(x_Ph, 1); }
         Inline auto bx3(const coord_t<D>& x_Ph) const -> real_t { return B_guide + turb(x_Ph, 2); }
@@ -581,25 +524,16 @@ namespace user
         //! =========================================================================
         //! MOTIONAL ELECTRIC FIELD    E = -(u_motional x B)
         //!
-        //! Each species moves at u_total_species = u_perturbed + u_drift_species.
-        //! E is chosen so that the Lorentz force q_s (E + u_total_species x B) gives
-        //! both species the SAME acceleration (= Lorentz force per particle / h_s):
-        //! the plasma as a whole feels only J x B (h_s = enthalpy per particle) 
-        //! 
-        //! With E = -(u_motional x B), this requires 
+        //! E gives both species the same acceleration per enthalpy, q_s (E + u_total_s x B) / h_s, so the plasma as a whole feels only J x B:
         //!     q_1 (u_total_1 - u_motional) / h_1 = q_2 (u_total_2 - u_motional) / h_2
         //!     =>  u_motional = (h_2 u_total_1 + h_1 u_total_2) / (h_1 + h_2) = u_perturbed + u_drift_1 + u_drift_2,
-        //! where u_drift_species = sign(q_s) lambda / h_s (TurbCurrentDist)
+        //! with u_drift_s = sign(q_s) lambda / h_s (TurbCurrentDist).
+        //!     pair plasma, equal T : u_drift_1 = -u_drift_2  ->  u_motional = u_perturbed (ideal MHD)
+        //!     ion-electron plasma  : u_motional ~ electron velocity -> E = -(u_perturbed x B) + Hall field
         //!
-        //!     pair plasma + equal T : u_drift_1 = -u_drift_2  ->  u_motional = u_perturbed (ideal MHD)
-        //!     ion-electron plasma   : u_motional ~ electron velocity -> E = -(u_perturbed x B) + Hall field
-        //!
-        //! Velocities are 3-velocities in units of c, and c = 1 in code units.
-        //!
-        //!     u_motional = u_perturbed + u_motional_coeff * J_code/AMP,   u_motional_coeff = u_drift_coeff_1 + u_drift_coeff_2
-        //!  with J_code/AMP from first_order_current (curl(B) with its sigma_h split)
+        //!     u_motional = u_perturbed + u_motional_coeff J_code/AMP,  u_motional_coeff = u_drift_coeff_1 + u_drift_coeff_2,
+        //! with J_code/AMP from first_order_current. Velocities are 3-velocities [c].
         //! =========================================================================
-
         Inline void motional_E(const coord_t<D>& x_Ph, real_t& Ex, real_t& Ey, real_t& Ez) const
         {
             real_t u_perturbed_x = ZERO, u_perturbed_y = ZERO, u_perturbed_z = ZERO;
@@ -636,17 +570,10 @@ namespace user
         }
 
         //! =========================================================================
-        //! curl(B) (~ J)
+        //! curl(B):  curl(b cos(k.x + ph)) = -(k x b) sin(k.x + ph)
         //!
-        //!     B_m(x) = b_m cos(k_m.x + ph_m)
-        //!     curl(b cos(k.x + ph)) = -(k x b) sin(k.x + ph)
-        //!
-        //! The uniform B_guide has zero curl, so only the mode sum contributes.
-        //! kc is used in place of k so that the DISCRETE Yee curl is matched
-        //! exactly (see init_turbulence); with kc = k this is the continuum curl.
-        //!
-        //! Returns curl(B) only: J_code = AMP * curl(B) and u_drift_species = u_drift_coeff_s * curl(B)
-        //!  are computed by the callers.
+        //! kc replaces k so that the DISCRETE Yee curl is matched exactly (see init_turbulence). B_guide has no curl.
+        //! The currents built on it are first_order_current (sigma_h split) and loaded_current (adds the convection term).
         //! =========================================================================
         Inline void curl_B(const coord_t<D>& x_Ph, real_t& curl_B_x, real_t& curl_B_y, real_t& curl_B_z) const
         {
@@ -667,23 +594,14 @@ namespace user
         }
 
         //! =========================================================================
-        //! SIGMA_H SPLIT OF THE CURRENT:  J_code = AMP * [ curl(B) - f (curl B)_perp ]  (first order)
+        //! SIGMA_H SPLIT OF THE CURRENT:  J_code = AMP [ curl(B) - f (curl B)_perp ],  f = sigma_h / (1 + sigma_h)  (first order)
         //!
-        //!  NEEDED ONLY FOR sigma_h >= 0.1, OR FOR B_guide = 0 (where the error without
-        //!  it is sigma_h itself). For sigma_h << 0.1 with a guide field, f -> sigma_h -> 0
-        //!  and this reduces to J_code = AMP curl(B), so it is applied unconditionally.
-        //!
-        //!  A current perpendicular to the local B accelerates the plasma (J x B), and the
-        //!  growing E = -(u x B) supplies part of curl(B) as displacement current:
+        //!  A current across the local B accelerates the plasma (J x B), and the growing E = -(u x B) supplies part of curl(B) as
+        //!  displacement current:
         //!      c (curl B)_perp = 4 pi J_perp + dE_perp/dt,  dE_perp/dt = J_perp B^2 / (c w)
-        //!   => J_perp = (c/4 pi) (curl B)_perp / (1 + sigma_h),   sigma_h = B^2 / (4 pi w)
-        //!  The field-aligned part is carried in full (E_par = 0). sigma_h is evaluated with
-        //!  the LOCAL |B|^2, so f -> 0 at magnetic nulls, where the plasma carries all of J.
-        //!
-        //!  2D (k in X-Y, B_guide along Z): J_z is reduced and an in-plane current along the
-        //!  tilted field lines appears. 3D: the in-plane current from d/dZ is also reduced
-        //!  (J = curl(B) (1 - vA^2/c^2) for waves along B). First order in the fluctuations.
-        //!  Used for the Hall part of E; the drifts use loaded_current (adds the convection term).
+        //!   => J_perp = (c/4 pi) (curl B)_perp / (1 + sigma_h),   sigma_h = B^2 / (4 pi w), with the LOCAL |B|^2 (f -> 0 at nulls).
+        //!  The field-aligned part is carried in full (E_par = 0). f -> sigma_h -> 0 for sigma_h << 0.1, so it is applied unconditionally.
+        //!  2D (k in X-Y, B_guide along Z): J_z is reduced and an in-plane current along the tilted field lines appears.
         //! =========================================================================
         Inline void sigma_split(const real_t (&B)[3], real_t (&V)[3]) const
         {
@@ -697,6 +615,7 @@ namespace user
             for (int i = 0; i < 3; ++i) { V[i] -= perp_reduction * (V[i] - parallel_over_B * B[i]); }
         }
 
+        //* J/AMP at first order (used for the Hall part of E)
         Inline void first_order_current(const coord_t<D>& x_Ph, real_t& current_x, real_t& current_y, real_t& current_z) const
         {
             real_t B[3] = { turb(x_Ph, 0), turb(x_Ph, 1), B_guide + turb(x_Ph, 2) };
@@ -706,7 +625,7 @@ namespace user
             current_x = current[0]; current_y = current[1]; current_z = current[2];
         }
 
-        //* curl(curl B) = sum_m |kc_m|^2 b_m cos(k_m.x + ph_m), using kc . b = 0 (k~-built amplitudes)
+        //* curl(curl B) = sum_m |kc_m|^2 b_m cos(k_m.x + ph_m), using kc . b = 0
         Inline void curl_curl_B(const coord_t<D>& x_Ph, real_t (&curl_curl)[3]) const
         {
             for (int i = 0; i < 3; ++i) { curl_curl[i] = ZERO; }
@@ -726,23 +645,13 @@ namespace user
         }
 
         //! =========================================================================
-        //! CURRENT CARRIED BY THE DRIFTS (TurbCurrentDist):
-        //!     J_drift / AMP = sigma_h split of [ curl(B) - div(E) u_convection ]
+        //! CURRENT CARRIED BY THE DRIFTS:  J_drift / AMP = sigma_h split of [ curl(B) - div(E) u_convection ]
         //!
-        //!  The displaced charge rho = AMP div(E) (load_charge_density) moves with the mean
-        //!  velocity of the two species, u_convection = (u_perturbed + u_motional)/2, so it
-        //!  carries the convection current rho u_convection on top of the drifts. Subtracting
-        //!  it BEFORE the sigma_h split makes the TOTAL current
+        //!  The displaced charge rho = AMP div(E) moves with the mean species velocity u_convection = (u_perturbed + u_motional)/2 and
+        //!  carries rho u_convection on top of the drifts. Subtracting it BEFORE the split makes the total current
         //!      along B:   AMP (curl B)_par
         //!      across B:  [AMP (curl B)_perp + sigma_h rho u_convection_perp] / (1 + sigma_h)
-        //!  i.e. the drift current of the polarisation charge is kept where it is physical, and
-        //!  only its excess is removed: rho u_par in full, rho u_perp / (1 + sigma_h).
-        //!
-        //!  Nonzero only where E != 0: in a pair plasma only when u_perturbed is loaded (or
-        //!  T_1 != T_2); in an ion-electron plasma always (Hall field). Relative size ~ (u/c)^2,
-        //!  so negligible for sigma_h << 0.1. rho and u_motional are taken at first order
-        //!  (first_order_current), so there is no recursion; the Hall part of curl(u_motional)
-        //!  uses curl(curl B), ignoring the sigma_h split there.
+        //!  Nonzero only where E != 0; relative size ~ (u/c)^2. rho and u_motional are taken at first order (no recursion).
         //! =========================================================================
         Inline void loaded_current(const coord_t<D>& x_Ph, real_t& current_x, real_t& current_y, real_t& current_z) const
         {
@@ -787,37 +696,19 @@ namespace user
     };
 
     //! =========================================================================
-    //!  Energy distribution: Maxwell-Juttner at theta_s, drifting at the local
-    //!  LAB-frame velocity  u_total_species = u_perturbed + u_drift_species
+    //!  Energy distribution: Maxwell-Juttner at theta_s, drifting at the local LAB-frame velocity u_total_species = u_perturbed + u_drift_species
     //!
-    //!  Entity integrates   dE/dt = curl(B) - (r0/d0^2) J,  AMP = d0^2 / r0 = d0 * sqrt(sigma0).
-    //!  The drifts carry J_code = AMP * J_loaded, J_loaded = sigma_h split of [curl(B) - div(E) u_convection]
-    //!  (InitFields::loaded_current; = curl(B) for sigma_h << 0.1). Below, curl(B) stands for J_loaded.
+    //!  Entity integrates dE/dt = curl(B) - (rho0/d0^2) J, so the particles must carry J_code = AMP J_loaded, AMP = d0^2/rho0 = d0 sqrt(sigma0),
+    //!  J_loaded = InitFields::loaded_current (= curl(B) for sigma_h << 0.1).
     //!
-    //!  The two species carry J at fixed density n_s and |q_s| = 1:
+    //!  With |q_s| = 1:  J_code = sum_s n_s q_s u_drift_species. Each species drifts with the same momentum per particle lambda in opposite
+    //!  directions, h_s u_drift_species = sign(q_s) lambda (h_s = m_s <gamma_s> + T_s), so sum_s n_s h_s u_drift_species = 0 and
+    //!        u_drift_species = sign(q_s) AMP J_loaded / ( h_s sum_t n_t/h_t ) = u_drift_coeff_s J_loaded.
+    //!  Cold: the light species carries ~ m_heavy/(m_1 + m_2) of J. Pair at equal T: equal and opposite drifts.
     //!
-    //!        J_code = sum_s n_s q_s u_drift_species
-    //!
-    //!  A slowly drifting thermal species carries momentum density n_s h_s u_drift_species,
-    //!  where h_s = m_s <gamma_s> + T_s is its enthalpy per particle. Each species drifts  
-    //!  with the same momentum per particle, lambda, in opposite directions,  
-    //!  h_s u_drift_species = sign(q_s) lambda. With equal densities the momenta cancel,
-    //!  sum_s n_s h_s u_drift_species = 0, and the current is J_code = lambda sum_s n_s / h_s
-    //!
-    //!        u_drift_species = sign(q_s) * AMP * curl(B) / ( h_s * sum_t n_t/h_t )
-    //!                        = u_drift_coeff_s * curl(B).
-    //!
-    //!  Cold plasma: h_s -> m_s (current carried mostly by the light species).
-    //!  Pair plasma at equal temperatures: equal and opposite drifts.
-    //!
-    //!  Velocity sampling in TurbCurrentDist makes each species' mean 3-velocity 
-    //!  <v> = u_total_species (on average, up to particle noise), and the injector 
-    //!  loads uniform lab densities n_s. The loaded current is therefore  
-    //!  sum_s q_s n_s u_total_species = sum_s q_s n_s u_perturbed + sum_s q_s n_s u_drift_species = 0 + AMP * curl(B):
-    //!  the u_perturbed terms cancel because the plasma is neutral (equal n_s, opposite q_s), 
-    //!  for any regime and any orientation of u_perturbed relative to J. After the charge-loading
-    //!  displacement it is not exactly neutral; that convection current is what J_loaded subtracts.
-    //!  
+    //!  The sampler gives each species the mean 3-velocity u_total_species and the injector loads uniform n_s, so the loaded current is
+    //!  sum_s q_s n_s u_total_species = AMP J_loaded: u_perturbed cancels in a neutral plasma. After the charge-loading displacement the
+    //!  plasma is not exactly neutral; that convection current is what J_loaded subtracts.
     //! =========================================================================
     template <class M>
     struct TurbCurrentDist
@@ -829,17 +720,14 @@ namespace user
                         maxwellian { pool, theta_s }, pool { pool }, theta { theta_s }, u_drift_coeff { u_drift_coeff },
                         flds { flds }, vel { vel } {}
 
-        //? ISOTROPIC Maxwell-Juttner four-velocity at temperature theta = kT_s/(m_s c^2), in the rest frame.
-        //? theta >= 0.5: Entity's Maxwellian, which uses the exact Sobol method there.
-        //? theta <  0.5: Entity's Maxwellian draws a non-relativistic Gaussian four-velocity, which loads
-        //?   <gamma> - 1 at 0.98, 0.93, 0.81, 0.62 of the Maxwell-Juttner value at theta = 0.01, 0.03, 0.1, 0.3,
-        //?   so the energy eps = gamma - 1 is sampled exactly here instead. Its distribution is
-        //?       f(eps) ~ sqrt(eps) (1 + eps) sqrt(1 + eps/2) exp(-eps/theta),
-        //?   and since sqrt(1 + x) <= 1 + x/2 it is bounded by the envelope sqrt(eps) (1 + eps)(1 + eps/4) exp(-eps/theta):
-        //?   a mixture of Gamma distributions of shape 3/2, 5/2, 7/2 and scale theta, with weights 1 : 15 theta/8 : 15 theta^2/16.
-        //?   Gamma(k + 1/2) = (sum of k unit exponentials) + Z^2/2 with Z normal. A candidate is accepted with
-        //?   probability f/envelope = sqrt(1 + eps/2) / (1 + eps/4); the acceptance rate is above 0.97 for theta < 0.5.
-        //?   The direction is isotropic and |u| = sqrt(eps (eps + 2)).
+        //? ISOTROPIC Maxwell-Juttner four-velocity at theta = kT_s/(m_s c^2), rest frame.
+        //? theta >= 0.5: Entity's Maxwellian (exact Sobol method).
+        //? theta <  0.5: Entity's Maxwellian is a non-relativistic Gaussian (loads <gamma> - 1 at 0.98, 0.93, 0.81, 0.62 of the exact value at
+        //?   theta = 0.01, 0.03, 0.1, 0.3), so eps = gamma - 1 is sampled exactly here. Its distribution
+        //?       f(eps) ~ sqrt(eps) (1 + eps) sqrt(1 + eps/2) exp(-eps/theta)
+        //?   is bounded (sqrt(1 + x) <= 1 + x/2) by the envelope sqrt(eps) (1 + eps)(1 + eps/4) exp(-eps/theta): a mixture of Gamma(3/2, 5/2, 7/2)
+        //?   of scale theta with weights 1 : 15 theta/8 : 15 theta^2/16. Gamma(k + 1/2) = (k unit exponentials) + Z^2/2. Accept with
+        //?   probability sqrt(1 + eps/2) / (1 + eps/4) (rate > 0.97 for theta < 0.5). Isotropic direction, |u| = sqrt(eps (eps + 2)).
         Inline void thermal_sample(const coord_t<D>& x_Ph, vec_t<Dim::_3D>& v) const
         {
             if (theta >= HALF) { maxwellian(x_Ph, v); return; }
@@ -856,7 +744,7 @@ namespace user
             bool   accepted = false;
             while (!accepted)
             {
-                //* choose the component: number of unit exponentials beyond the first (0, 1 or 2)
+                //* component: number of unit exponentials beyond the first (0, 1 or 2)
                 const real_t pick          = Random<real_t>(rand_gen) * weight_total;
                 const int    extra_shapes  = (pick < weight_shape_3_2) ? 0 : ((pick < weight_shape_3_2 + weight_shape_5_2) ? 1 : 2);
 
@@ -891,20 +779,14 @@ namespace user
             pool.free_state(rand_gen);
         }
 
-        //? Turn an ISOTROPIC Juttner sample into one drifting at u_total_species (lab
-        //? frame) by the flipping method of Zenitani (2015), arXiv:1504.03910 -- the
-        //? same scheme Entity's arch::energy_dist::Maxwellian uses, generalised
-        //? to a drift along an arbitrary, position-dependent direction.
-        //?
-        //? A naive Lorentz boost of each sampled four-velocity is NOT equivalent: it
-        //? misses the Jacobian g'/g between the rest-frame and lab-frame momentum
-        //? measures and undersamples forward-moving particles.
+        //? Isotropic Juttner sample -> drifting at u_total_species (lab frame) by the flipping method of Zenitani (2015), arXiv:1504.03910,
+        //? as in Entity's Maxwellian, generalised to a position-dependent drift direction. A plain Lorentz boost of each sample misses
+        //? the Jacobian gamma'/gamma and undersamples forward-moving particles.
         Inline void drift_sample(vec_t<Dim::_3D>& v, real_t u_total_species_x, real_t u_total_species_y, real_t u_total_species_z) const
         {
             real_t u_total_species_sq = SQR(u_total_species_x) + SQR(u_total_species_y) + SQR(u_total_species_z);
 
-            //! Safety net: make_init scales u_perturbed so that |u_total_species| <=  setup.u_total_cap (< 0.99)
-            //! on the sampling grid, so this clamp can act at most between sampling points.
+            //! Safety net: make_init keeps |u_total_species| <= u_total_cap (< 0.99) on the sampling grid; this clamp acts at most between samples
             constexpr real_t MAX_DRIFT_SPEED    = static_cast<real_t>(0.99);
             constexpr real_t MAX_DRIFT_SPEED_SQ = MAX_DRIFT_SPEED * MAX_DRIFT_SPEED;
             if (u_total_species_sq >= MAX_DRIFT_SPEED_SQ)
@@ -935,7 +817,7 @@ namespace user
                 pool.free_state(rand_gen);
             }
 
-            //* boost the parallel component; the perpendicular part is untouched
+            //* boost the parallel component: u_par' = Gamma_V (u_par + |V| gamma); the perpendicular part is untouched
             const real_t four_velocity_parallel_boosted = lorentz_factor_drift * (four_velocity_parallel + u_total_species_magnitude * lorentz_factor);
 
             v[0] = four_velocity_x - four_velocity_parallel_initial * direction_x + four_velocity_parallel_boosted * direction_x;
@@ -948,7 +830,7 @@ namespace user
             //* 1. isotropic thermal four-velocity: exact Maxwell-Juttner at theta_s
             thermal_sample(x_Ph, v);
 
-            //* 2. current-carrying drift of this species, u_drift_species = u_drift_coeff_s * J_code/AMP
+            //* 2. current-carrying drift of this species, u_drift_species = u_drift_coeff_s J_loaded
             real_t u_drift_species_x = ZERO, u_drift_species_y = ZERO, u_drift_species_z = ZERO;
             if (u_drift_coeff != ZERO)
             {
@@ -976,7 +858,7 @@ namespace user
         const TurbVelocity<M::Dim> vel;
     };
 
-    //! Uniform spatial distribution 
+    //! Uniform spatial distribution
     template <Dimension D>
     struct UniformDist
     {
@@ -997,27 +879,27 @@ namespace user
         Metadomain<S, M>&       metadomain;
 
         //? Scales
-        const real_t larmor0;                   //* rho0 [d0]
-        const real_t skindepth0;                //* d0   [d0]
-        const real_t sp1_mass;                  //* fiducial units
-        const real_t sp2_mass;                  //* species 2 mass (positrons / ions)
+        const real_t larmor0;                   //* rho0 [code length]
+        const real_t skindepth0;                //* d0   [code length]
+        const real_t sp1_mass;                  //* species 1 (electrons) mass, fiducial units
+        const real_t sp2_mass;                  //* species 2 (positrons / ions) mass
         const real_t sp1_charge;                //* signed, |q| must be 1
         const real_t sp2_charge;
-        const real_t mass_ratio;                //* DERIVED = sp2_mass / sp1_mass  (= 1 for pair plasma)
-        const real_t sigma0;                    //* (skindepth0/larmor0)^2 = magnetisation of the FIDUCIAL species at B = 1
+        const real_t mass_ratio;                //* sp2_mass / sp1_mass (= 1 for pair plasma)
+        const real_t sigma0;                    //* (skindepth0/larmor0)^2 = magnetisation of the FIDUCIAL species at n0, |B| = 1
 
         //? Setup
-        const real_t    B_guide;                //* guide field along x3, setup.B_guide (0 -> zero-mean-field turbulence) in code B units
-        const real_t    B_perturbed_rms;        //* RMS |B_perturbed|, setup.B_perturbed_rms in code B units
+        const real_t    B_guide;                //* guide field along x3 (0 -> zero-mean-field turbulence)
+        const real_t    B_perturbed_rms;        //* RMS |B_perturbed|
         const int       kmin, kmax;             //* mode-number band (inclusive)
-        const real_t    energy_spectrum_slope;  //* E(k) ~ k^energy_spectrum_slope, shell spectrum (0 default = flat)
+        const real_t    energy_spectrum_slope;  //* E(k) ~ k^energy_spectrum_slope, shell spectrum (required input)
         const long long B_seed;                 //* phases of B_perturbed
         const long long v_seed;                 //* phases of u_perturbed; MUST differ from B_seed
         const int       turb_kplane;            //* k-space restriction: -1 = 3D, 0 = x1x2, 1 = x2x3, 2 = x3x1
         const int       turb_a_axis;            //* vector potential axis: -1 = random _|_ k, 0/1/2 = x1/x2/x3
         const bool      turb_rand_amp;          //* true -> Gaussian random mode amplitudes
         const real_t    temperature;            //* species-1 temperature kT_1 / (m0 c^2)
-        const real_t    temperature_ratio;      //* T_2 / T_1 (ratio of kT, not of theta); 1 -> equal temperatures
+        const real_t    temperature_ratio;      //* T_2 / T_1 (ratio of kT, not of theta)
         const bool      perturb_velocity;       //* false -> u_perturbed = 0
         const real_t    u_total_cap;            //* cap on |u_total_species| for both species [c]
 
@@ -1029,21 +911,20 @@ namespace user
         real_t                theta_1 { ZERO }, theta_2 { ZERO };                                 //* kT_s / (m_s c^2)
         real_t                enthalpy_per_particle_1 { ONE }, enthalpy_per_particle_2 { ONE };   //* h_s = m_s <gamma_s> + T_s [m0 c^2]
         std::array<real_t, 3> B_perturbed_rms_component { ZERO, ZERO, ZERO };
-        real_t                AMP { ONE };        //* d0^2/r0 = d0 sqrt(sigma0): J_code = AMP curl(B)
+        real_t                AMP { ONE };        //* d0^2/rho0 = d0 sqrt(sigma0): J_code = AMP curl(B)
         real_t                u_drift_coeff_1 { ZERO }, u_drift_coeff_2 { ZERO };
         real_t                u_motional_coeff { ZERO };
-        real_t                sigma_h_per_B_sq { ZERO };     //* sigma0 / w: local sigma_h = sigma_h_per_B_sq |B|^2 (InitFields::loaded_current)
+        real_t                sigma_h_per_B_sq { ZERO };         //* sigma0 / w: local sigma_h = sigma_h_per_B_sq |B|^2
 
         real_t                u_perturbed_rms_alfven { ZERO };   //* Alfven-relation target for RMS |u_perturbed| [c]
         real_t                u_perturbed_cap_factor { ONE };    //* s <= 1 applied to u_perturbed by the u_total cap
-        real_t                u_perturbed_rms { ZERO };          //* RMS |u_perturbed| actually loaded = s * u_perturbed_rms_alfven (0 if perturb_velocity = false)
+        real_t                u_perturbed_rms { ZERO };          //* RMS |u_perturbed| loaded = s u_perturbed_rms_alfven (0 if perturb_velocity = false)
         std::array<real_t, 3> u_perturbed_rms_component { ZERO, ZERO, ZERO };
 
         //* peaks on the host sampling grid, after the cap [c]
-        real_t                peak_u_perturbed { ZERO };
         real_t                peak_u_drift_1 { ZERO }, peak_u_drift_2 { ZERO };
         real_t                peak_u_total_1 { ZERO }, peak_u_total_2 { ZERO };
-        real_t                peak_charge_displacement { ZERO };   //* max |xi_s| [d0], set in print_setup, checked in load_charge_density
+        real_t                peak_charge_displacement { ZERO };   //* max |xi_s| [code length], set in print_setup, checked in load_charge_density
 
         std::vector<TurbMode> B_perturbed_modes_host;
         array_t<real_t*>      kx_d, ky_d, kz_d, bx_d, by_d, bz_d, ph_d, kcx_d, kcy_d, kcz_d;
@@ -1095,8 +976,7 @@ namespace user
             raise::ErrorIf(g.temperature_ratio <= ZERO, "setup.temperature_ratio (T_2/T_1) must be > 0", HERE);
             raise::ErrorIf(g.u_total_cap <= ZERO || g.u_total_cap >= static_cast<real_t>(0.99), "setup.u_total_cap must lie in (0, 0.99) [c]", HERE);
 
-            //? u_drift_species = sign(q_s) * AMP * curl(B) / (h_s sum_t n_t/h_t) assumes |q_s| = 1 for 
-            //? both species, and opposite signs so that they can counter-drift at zero net charge.
+            //? u_drift_species = sign(q_s) AMP J / (h_s sum n/h) assumes |q_s| = 1 and opposite signs (counter-drift at zero net charge)
             raise::ErrorIf(math::abs(math::abs(g.sp1_charge) - ONE) > (real_t)1.0e-5 ||
                            math::abs(math::abs(g.sp2_charge) - ONE) > (real_t)1.0e-5,
                            "current loading requires |q_s| = 1 for both species: "
@@ -1106,16 +986,12 @@ namespace user
                            "current loading requires the two species to have OPPOSITE charge "
                            "signs: they must counter-drift to carry J at zero net charge.", HERE);
 
-            //? Temperature
-            //? T_s = kT_s / (m0 c^2) is what enters pressures, enthalpies and Debye
-            //? lengths; theta_s = T_s / m_s = kT_s / (m_s c^2) is what the
-            //? Maxwell-Juettner sampler and <gamma_s> take.
+            //? T_s = kT_s / (m0 c^2) enters pressures, enthalpies and Debye lengths; theta_s = T_s / m_s enters the sampler and <gamma_s>
             g.temperature_1 = g.temperature;
             g.temperature_2 = g.temperature * g.temperature_ratio;
             g.theta_1       = g.temperature_1 / g.sp1_mass;
             g.theta_2       = g.temperature_2 / g.sp2_mass;
 
-            //* h_s = m_s <gamma_s> + T_s: inertia per particle of a drifting thermal species
             g.enthalpy_per_particle_1 = enthalpy_per_particle(g.sp1_mass, g.temperature_1);
             g.enthalpy_per_particle_2 = enthalpy_per_particle(g.sp2_mass, g.temperature_2);
 
@@ -1124,8 +1000,7 @@ namespace user
 
             const bool is_3d = (D == Dim::_3D);
 
-            //? B_perturbed is built with the Yee-matched k~ = (2/dx) sin(k dx/2): it is then exactly divergence-free on the grid (k~ . b = 0),
-            //? and the curl it supplies, -(k~ x b) sin(k.x + ph), equals the discrete Yee curl of the initialised B to round-off.
+            //? B_perturbed with the Yee-matched k~: exactly divergence-free on the grid, and -(k~ x b) sin(k.x + ph) equals the discrete Yee curl
             const auto&  mesh_for_k = g.metadomain.mesh();
             const double cell_dx    = (double)g.Lx / (double)mesh_for_k.n_active(in::x1);
             const double cell_dy    = (double)g.Ly / (double)mesh_for_k.n_active(in::x2);
@@ -1137,40 +1012,27 @@ namespace user
                                                           g.energy_spectrum_slope, g.turb_kplane, g.turb_a_axis,
                                                           g.turb_rand_amp, { cell_dx, cell_dy, cell_dz }, g.B_perturbed_modes_host);
 
-            g.AMP = SQR(g.skindepth0) / g.larmor0;      //* AMP = d0^2/r0 = d0 sqrt(sigma0)
+            g.AMP = SQR(g.skindepth0) / g.larmor0;      //* AMP = d0^2/rho0 = d0 sqrt(sigma0)
 
-            //! n_s = N_PER_SP is set by the injector: CONFIRMED against
-            //! src/archetypes/particle_injector.h, the last argument of
-            //! InjectNonUniform is the "Total number density (in units of n0)", and
-            //! the kernel takes ppc = number_density * ppc0 * HALF, i.e. an even split.
-            //*   u_drift_coeff_s = sign(q_s) AMP / (h_s sum_t n_t/h_t)
+            //* u_drift_coeff_s = sign(q_s) AMP / (h_s sum_t n_t/h_t), n_t = N_PER_SP (InjectNonUniform splits the total density evenly)
             const real_t inv_enthalpy_sum = N_PER_SP * (ONE / g.enthalpy_per_particle_1 + ONE / g.enthalpy_per_particle_2);
             const real_t sign_1           = (g.sp1_charge < ZERO) ? -ONE : ONE;
             const real_t sign_2           = (g.sp2_charge < ZERO) ? -ONE : ONE;
             g.u_drift_coeff_1 = sign_1 * g.AMP / (g.enthalpy_per_particle_1 * inv_enthalpy_sum);
             g.u_drift_coeff_2 = sign_2 * g.AMP / (g.enthalpy_per_particle_2 * inv_enthalpy_sum);
 
-            //* u_motional = u_perturbed + u_drift_1 + u_drift_2 (see InitFields::motional_E):
-            //* exactly zero correction for a pair plasma at equal temperatures
+            //* u_motional = u_perturbed + u_drift_1 + u_drift_2 (InitFields::motional_E): zero correction for a pair plasma at equal T
             g.u_motional_coeff = g.u_drift_coeff_1 + g.u_drift_coeff_2;
 
-            //~ Velocity perturbation: Alfven-relation target
             raise::ErrorIf(g.perturb_velocity && (g.v_seed == g.B_seed),
                            "setup.v_seed must differ from setup.B_seed. Equal seeds produce "
                            "the same phases and 'random' amplitudes for each mode, yielding "
                            "u_perturbed || B_perturbed everywhere -- a pure Elsasser state (z- = 0) "
                            "that is an exact nonlinear solution and does not cascade at all.", HERE);
 
-            //~ u_perturbed_rms follows from setup.B_perturbed_rms through the relativistic Alfven
-            //~ eigenrelation (setting it equal to B_perturbed_rms in code units would 
-            //~ ignore vA). Setting w as the relativistic ENTHALPY density (see enthalpy()),
-            //~
-            //~     u_perturbed_rms = B_perturbed_rms / sqrt(4 pi w + B^2) * c  =  (B_perturbed_rms / B_rms) * vA,
-            //~     vA / c = sqrt( sigma_h / (1 + sigma_h) ), sigma_h = B_rms^2 sigma0 / w.
-            //~
-            //~ For sigma_h << 1, B_rms cancels and u_perturbed_rms = B_perturbed_rms / sqrt(4 pi rho).
-            //~ In 2D with k _|_ B_guide the modes do not propagate, so this sets the
-            //~ kinetic/magnetic energy partition rather than describing Alfven waves
+            //~ Relativistic Alfven relation, w = relativistic enthalpy density:
+            //~     u_perturbed_rms = B_perturbed_rms / sqrt(4 pi w + B^2) c  =  (B_perturbed_rms / B_rms) vA,   vA / c = sqrt(sigma_h / (1 + sigma_h))
+            //~ In 2D with k _|_ B_guide the modes do not propagate, so this sets the kinetic/magnetic energy partition.
             {
                 const real_t B_rms_ = (real_t)std::sqrt((double)(g.B_guide * g.B_guide + g.B_perturbed_rms * g.B_perturbed_rms));
                 const real_t B_ref_ = (B_rms_ > ZERO) ? B_rms_ : ONE;
@@ -1181,8 +1043,7 @@ namespace user
                 //* computed even when perturb_velocity = false: the eddy-time estimate uses it
                 g.u_perturbed_rms_alfven = vA_h * g.B_perturbed_rms / B_ref_;
 
-                //* perturb_velocity = false -> target 0 -> init_turbulence returns an empty
-                //* table -> u_perturbed = 0. u_drift_species is unaffected.
+                //* perturb_velocity = false -> target 0 -> empty table -> u_perturbed = 0 (drifts unaffected)
                 const real_t u_perturbed_rms_target = g.perturb_velocity ? g.u_perturbed_rms_alfven : ZERO;
                 g.u_perturbed_rms           = u_perturbed_rms_target;
                 g.u_perturbed_rms_component = init_turbulence(g.Lx, g.Ly, g.Lz, is_3d, u_perturbed_rms_target,
@@ -1191,32 +1052,18 @@ namespace user
                                                               g.turb_rand_amp, { 0.0, 0.0, 0.0 }, g.u_perturbed_modes_host);
             }
 
-            //~ Capping particles' velocity perturbation
-            //~
-            //~ Each species moves at u_total_species(x) = s u_perturbed(x) + u_drift_species(x)
-            //~ in the lab frame. u_perturbed is a sum of modes, so where many modes add in phase
-            //~ its local speed is several times u_perturbed_rms; at large vA/c (high
-            //~ sigma, or weak guide field) those peaks may exceed c. To prevent this,
-            //~ u_perturbed pattern is scaled by a factor
-            //~
+            //~ u_total cap. Each species moves at u_total_species = s u_perturbed + u_drift_species; where modes add in phase the local
+            //~ speed is several times the RMS and can exceed c at large vA/c. u_perturbed is scaled by
             //~     s = largest value in [0, 1] with  max_{x,species} |s u_perturbed + u_drift_species| <= u_total_cap,
-            //~
-            //~ which keeps u_perturbed exactly solenoidal and band-limited; only the
-            //~ kinetic-to-magnetic fluctuation energy ratio drops, to s^2 times the
-            //~ Alfven value. f(s) = max|s u_perturbed + u_drift_species| is convex in s,
-            //~ so {f <= cap} is an interval containing 0 and bisection finds its upper end.
-            //~ 
-            //~ If u_drift_species alone exceeds u_total_cap (f(0) > u_total_cap), no s 
-            //~ helps: the field needs more current than this plasma density can carry,
-            //~ since u_drift ~ J / (n q). Remedies: lower kmax or B_perturbed_rms, or raise the 
-            //~ density in code units (smaller skindepth0 or larger larmor0, i.e. lower sigma0); 
-            //~ raising ppc0 does not help.
+            //~ which keeps it solenoidal; the kinetic/magnetic fluctuation energy drops by s^2. f(s) is convex, so {f <= cap} is an interval
+            //~ containing 0 and bisection finds its upper end. If f(0) > cap, the field needs more current than this density can carry
+            //~ (u_drift ~ J / (n q)): lower kmax or B_perturbed_rms, or lower sigma0. Raising ppc0 does not help.
             {
                 const std::array<int, 3> counts = sampling_counts(g);
                 const std::size_t n_samples = (std::size_t)counts[0] * (std::size_t)counts[1] * (std::size_t)counts[2];
 
                 std::vector<double> u_perturbed_samples(3 * n_samples, 0.0);
-                std::vector<double> first_order_current_samples(3 * n_samples, 0.0);   //* first-order J_code/AMP (sigma_h split of curl B)
+                std::vector<double> first_order_current_samples(3 * n_samples, 0.0);   //* first-order J_code/AMP
 
                 std::size_t sample_index = 0;
                 for (int ix = 0; ix < counts[0]; ++ix)
@@ -1301,7 +1148,6 @@ namespace user
 
                 double peak_u_perturbed, peak_u_drift_1, peak_u_drift_2, peak_u_total_1, peak_u_total_2;
                 peak_speeds(cap_factor, peak_u_perturbed, peak_u_drift_1, peak_u_drift_2, peak_u_total_1, peak_u_total_2);
-                g.peak_u_perturbed = (real_t)peak_u_perturbed;
                 g.peak_u_drift_1   = (real_t)peak_u_drift_1;
                 g.peak_u_drift_2   = (real_t)peak_u_drift_2;
                 g.peak_u_total_1   = (real_t)peak_u_total_1;
@@ -1391,8 +1237,7 @@ namespace user
             Kokkos::deep_copy(g.kcx_d, h_kcx); Kokkos::deep_copy(g.kcy_d, h_kcy);
             Kokkos::deep_copy(g.kcz_d, h_kcz);
 
-            //* g.turb_vel was filled above, so InitFields can hold it and serve
-            //* the motional field E = -(u_motional x B) from ex1/ex2/ex3.
+            //* g.turb_vel is filled above, so InitFields can hold it and serve E = -(u_motional x B) from ex1/ex2/ex3
             return InitFields<D> { g.B_guide,
                                    g.kx_d, g.ky_d, g.kz_d,
                                    g.bx_d, g.by_d, g.bz_d, g.ph_d,
@@ -1400,19 +1245,16 @@ namespace user
                                    g.turb_vel, g.u_motional_coeff, g.sigma_h_per_B_sq };
         }
 
-        //? Densities in units of n0. Entity's n0 = ppc0 / V0 is the TOTAL fiducial
-        //? density, and InitPrtls injects ndens = 1 split evenly over the two
-        //? species, so n_s = 0.5 n0. Every sigma, enthalpy and pressure below must
-        //? carry this factor: sigma_s = B^2 sigma0 / (n_s m_s), NOT / m_s.
+        //? Densities in units of n0 (= ppc0 / V0, the TOTAL fiducial density). InitPrtls injects n_tot = 1 split evenly: n_s = 1/2.
+        //? Pressures and enthalpy densities use n_s; species sigma, skin depth and Debye length (print_setup) use n_tot.
         static constexpr real_t N_TOTAL  = static_cast<real_t>(1.0);
         static constexpr real_t N_PER_SP = static_cast<real_t>(0.5);
 
-        //? <gamma> of a 3D Maxwell-Juettner distribution, exactly: K1(1/theta)/K2(1/theta) + 3 theta, evaluated
-        //? by quadrature so that no special functions are needed and nothing underflows at small theta. With
-        //? eps = gamma - 1 = theta t^2, the distribution in t is  t^2 (1 + eps) sqrt(1 + eps/2) exp(-t^2)  (up to a
-        //? constant): smooth at t = 0 and negligible beyond t = 9. Simpson's rule with 4000 intervals agrees with the
-        //? Bessel-function form to ~1e-15 for 0.001 <= theta <= 100.
-        static auto gamma_mean(real_t theta) -> real_t
+        //? <gamma> of a 3D Maxwell-Juttner distribution, K1(1/theta)/K2(1/theta) + 3 theta, by quadrature (no special functions, no underflow).
+        //? With eps = gamma - 1 = theta t^2 the weight in t is t^2 (1 + eps) sqrt(1 + eps/2) exp(-t^2), negligible beyond t = 9.
+        //? Simpson's rule with 4000 intervals matches the Bessel form to ~1e-15 for 0.001 <= theta <= 100. Returned in double: for ions
+        //? <gamma> - 1 can be ~1e-6, below single precision.
+        static auto gamma_mean(real_t theta) -> double
         {
             constexpr int    n_intervals = 4000;
             constexpr double t_max       = 9.0;
@@ -1427,19 +1269,16 @@ namespace user
                 weight_sum       += simpson * weight;
                 gamma_weight_sum += simpson * (1.0 + eps) * weight;
             }
-            return (real_t)(gamma_weight_sum / weight_sum);
+            return gamma_weight_sum / weight_sum;
         }
 
-        //? Enthalpy per particle in units of m0 c^2:  h_s = m_s <gamma_s> + T_s
-        //? (energy + pressure per particle, theta_s = T_s / m_s). This is the inertia
-        //? of a drifting thermal species: momentum density = n_s h_s u for a slow drift u.
+        //? Enthalpy per particle [m0 c^2]:  h_s = m_s <gamma_s> + T_s. Inertia of a drifting thermal species: momentum density = n_s h_s u
         static auto enthalpy_per_particle(real_t mass, real_t temperature_s) -> real_t
         {
-            return mass * gamma_mean(temperature_s / mass) + temperature_s;
+            return (real_t)((double)mass * gamma_mean(temperature_s / mass) + (double)temperature_s);
         }
 
-        //? Relativistic enthalpy density in units of n0 m0 c^2:  w = sum_s n_s h_s.
-        //? This is the inertia that sets the Alfven speed
+        //? Enthalpy density [n0 m0 c^2]:  w = sum_s n_s h_s; sets the Alfven speed
         static auto enthalpy(real_t mass_1, real_t temperature_1_, real_t mass_2, real_t temperature_2_) -> real_t
         {
             return N_PER_SP * enthalpy_per_particle(mass_1, temperature_1_) + N_PER_SP * enthalpy_per_particle(mass_2, temperature_2_);
@@ -1468,6 +1307,33 @@ namespace user
             raise::ErrorIf(std::floor((double)real_value) != (double)real_value,
                            key + " must be a whole number, but the input gives " + std::to_string((double)real_value), HERE);
             return static_cast<int>(real_value);
+        }
+
+        //? Parameter set by Entity itself (not the input) as float or double (real_t or simtime_t); get<T> needs the exact type, so accept both. Aborts if missing.
+        static auto read_stored_real(const SimulationParams& p, const std::string& key) -> real_t
+        {
+            raise::ErrorIf(!p.contains(key), key + " not found in the simulation parameters", HERE);
+            const std::any& value = p.allVars().at(key);
+            if (value.type() == typeid(float))  { return static_cast<real_t>(std::any_cast<float>(value)); }
+            if (value.type() == typeid(double)) { return static_cast<real_t>(std::any_cast<double>(value)); }
+            raise::Error(key + " is stored with a type other than float or double", HERE);
+            return ZERO;
+        }
+
+        //? Integer parameter set by Entity itself, stored under an integer type that differs between keys (e.g. unsigned short); -1 if missing or not an integer
+        static auto read_stored_integer(const SimulationParams& p, const std::string& key) -> long long
+        {
+            if (!p.contains(key)) { return -1; }
+            const std::any& value = p.allVars().at(key);
+            if (value.type() == typeid(unsigned short))     { return static_cast<long long>(std::any_cast<unsigned short>(value)); }
+            if (value.type() == typeid(unsigned int))       { return static_cast<long long>(std::any_cast<unsigned int>(value)); }
+            if (value.type() == typeid(unsigned long))      { return static_cast<long long>(std::any_cast<unsigned long>(value)); }
+            if (value.type() == typeid(unsigned long long)) { return static_cast<long long>(std::any_cast<unsigned long long>(value)); }
+            if (value.type() == typeid(short))              { return static_cast<long long>(std::any_cast<short>(value)); }
+            if (value.type() == typeid(int))                { return static_cast<long long>(std::any_cast<int>(value)); }
+            if (value.type() == typeid(long))               { return static_cast<long long>(std::any_cast<long>(value)); }
+            if (value.type() == typeid(long long))          { return std::any_cast<long long>(value); }
+            return -1;
         }
 
         static auto species_mass(Metadomain<S, M>& m, std::size_t idx) -> real_t
@@ -1521,19 +1387,18 @@ namespace user
             Lz                    { zmax - zmin },
             init_flds             { make_init(*this) } { print_setup(); }
 
-        //? Startup diagnostics; all lengths in code units (d0)
+        //? Startup diagnostics. Lengths, times and fields in code units; c = 1.
+        //? Species sigma, skin depth and Debye length use the TOTAL density n_tot = n_1 + n_2.
         void print_setup()
         {
             int mpi_rank = 0;
             MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank);
 
-            const bool        is_pair = (mass_ratio == (real_t)1.0);
-            const std::string sp2     = is_pair ? "positron" : "ion";
+            const bool        is_pair = (mass_ratio == ONE);
             const std::string sp2s    = is_pair ? "positrons" : "ions";
             const std::string SP2u    = is_pair ? "Positrons" : "Ions";
-            const std::string sp2_tag = is_pair ? "e+" : "i";              //* subscript of omega_p for species 2
-            const std::string title   = is_pair ? "Decaying turbulence (pair plasma)"
-                                                : "Decaying turbulence (ion-electron plasma)";
+            const std::string sp2_tag = is_pair ? "e+" : "i";   //* subscript of omega_p for species 2
+            const std::string title   = is_pair ? "Decaying turbulence (pair plasma)" : "Decaying turbulence (ion-electron plasma)";
 
             const auto   nx1 = metadomain.mesh().n_active(in::x1);
             const auto   nx2 = metadomain.mesh().n_active(in::x2);
@@ -1541,88 +1406,107 @@ namespace user
             const real_t dy  = Ly / (real_t)nx2;
             real_t       dz  = ONE;
             if constexpr (D == Dim::_3D) { dz = Lz / (real_t)metadomain.mesh().n_active(in::x3); }
+            //* numerics set by Entity (Algorithms::setParams): dt = CFL dx0, dx0 = dx/sqrt(D); filter passes and shape order affect numerical heating
+            const real_t    dt                = read_stored_real(params, "algorithms.timestep.dt");
+            const long long current_filters   = read_stored_integer(params, "algorithms.current_filters");
+            const long long deposit_order     = read_stored_integer(params, "algorithms.deposit.order");   //* = SHAPE_ORDER (build option)
+            auto integer_text = [](long long value) -> std::string { return (value >= 0) ? std::to_string(value) : std::string("n/a (key or type not found)"); };
 
-            const real_t g1 = gamma_mean(theta_1);     //* electrons
-            const real_t g2 = gamma_mean(theta_2);     //* positrons / ions
+            const double g1 = gamma_mean(theta_1);   //* <gamma> of electrons, rest frame
+            const double g2 = gamma_mean(theta_2);   //* <gamma> of positrons / ions, rest frame
 
-            //! Everything below is evaluated at the ACTUAL initial RMS field, not at
-            //! a separate reference amplitude: the field scale comes from [scales].
+            //* field scale for magnetisations, betas and gyroradii: B_rms (1 if B = 0)
             const real_t B_rms = (real_t)std::sqrt((double)(B_guide * B_guide + B_perturbed_rms * B_perturbed_rms));
-            const real_t B_ref = (B_rms > (real_t)0.0) ? B_rms : (real_t)1.0;   //* guard: B = 0 run
+            const real_t B_ref = (B_rms > ZERO) ? B_rms : ONE;
 
-            //* sigma_s = B^2 / (4 pi n_s m_s c^2), n_s = 1/2
-            const real_t sigma_1_cold = sigma0 * B_ref * B_ref / (N_PER_SP * sp1_mass); //* electrons
-            const real_t sigma_2_cold = sigma0 * B_ref * B_ref / (N_PER_SP * sp2_mass); //* sp2
-            //* both species contribute inertia: 1/sigma = 1/s1 + 1/s2
-            const real_t sigma_cold   = sigma0 * B_ref * B_ref / (N_PER_SP * (sp1_mass + sp2_mass));
-            //! hot magnetisation uses the relativistic ENTHALPY w = sum_s n_s (m_s <g_s> + T_s),
-            //! not the energy density sum_s n_s m_s <g_s>: the pressure adds T_s per particle
-            //! to the inertia (2.9% at theta = 0.03), and it grows with theta.
-            const real_t w_enth       = enthalpy(sp1_mass, temperature_1, sp2_mass, temperature_2);
-            const real_t sigma_hot    = sigma0 * B_ref * B_ref / w_enth;
-            const real_t vA_cold      = (real_t)std::sqrt((double)sigma_cold / (1.0 + (double)sigma_cold));
-            const real_t vA_hot       = (real_t)std::sqrt((double)sigma_hot / (1.0 + (double)sigma_hot));
+            //! ---- magnetisation:  sigma = sigma0 B^2 / inertia ------------------------------------
+            //!   species:  inertia = n_tot m_s (cold),  n_tot h_s (hot),  h_s = m_s <g_s> + T_s
+            //!   plasma:   inertia = sum_s n_s m_s (cold),  w = sum_s n_s h_s (hot)   =>   1/sigma_plasma = sum_s (n_s/n_tot) / sigma_s
+            //!   The pressure T_s adds 2.9% to the inertia at theta = 0.03, more at higher theta.
+            const real_t w_enth = enthalpy(sp1_mass, temperature_1, sp2_mass, temperature_2);
+            auto magnetisation  = [&](real_t B, real_t inertia) -> real_t { return sigma0 * B * B / inertia; };
 
-            //! ---- kinetic scales -------------------------------------------------
-            //! Entity's n0 = ppc0 / V0 is the TOTAL fiducial density and InitPrtls
-            //! injects ndens = 1 split evenly, so n_s = n0/2:
-            //!
-            //!     d_s        = d0 sqrt(m_s <g_s> / n_s) = d0 sqrt(2 m_s <g_s>)   (relativistic inertia)
-            //!     lambda_D,s = d0 sqrt(T_s / n_s)       = d0 sqrt(2 T_s)        (Boltzmann screening: no <g_s>)
-            //!
-            //! The Debye length is already the full thermal value: the Boltzmann factor exp(-q phi / T) is exact for a
-            //! relativistic Maxwellian, so there is no inertia factor to add (equivalently, lambda_D = v_th / omega_p and
-            //! the 1/sqrt(<g>) of both cancels).
-            //!
-            //! Collective values follow from 1/x^2 = sum_s 1/x_s^2. The grid criterion
-            //! below is applied to the collective Debye length, because the finite-grid
-            //! instability aliases the TOTAL charge density.
-            const real_t d_1       = skindepth0 * (real_t)std::sqrt((double)(g1 * sp1_mass / N_PER_SP));
-            const real_t d_2       = skindepth0 * (real_t)std::sqrt((double)(g2 * sp2_mass / N_PER_SP));
-            const real_t d_plasma  = (real_t)(1.0 / std::sqrt(1.0 / SQR((double)d_1) + 1.0 / SQR((double)d_2)));
-            //! Larmor radius uses the thermal FOUR-velocity sqrt(<g>^2 - 1), not <g>.
-            const real_t thermal_four_velocity_1 = (real_t)std::sqrt(std::max(0.0, (double)(g1 * g1 - ONE)));
-            const real_t thermal_four_velocity_2 = (real_t)std::sqrt(std::max(0.0, (double)(g2 * g2 - ONE)));
-            const real_t rho_1     = larmor0 * thermal_four_velocity_1 * sp1_mass / B_ref;
-            const real_t rho_2     = larmor0 * thermal_four_velocity_2 * sp2_mass / B_ref;
-            const real_t lambda_D1 = skindepth0 * (real_t)std::sqrt((double)(temperature_1 / N_PER_SP));
-            const real_t lambda_D2 = skindepth0 * (real_t)std::sqrt((double)(temperature_2 / N_PER_SP));
-            const real_t lambda_Dpl = (real_t)(1.0 / std::sqrt(1.0 / SQR((double)lambda_D1) +
-                                                               1.0 / SQR((double)lambda_D2)));
+            const real_t sigma_1_cold       = magnetisation(B_ref, N_TOTAL * sp1_mass);
+            const real_t sigma_2_cold       = magnetisation(B_ref, N_TOTAL * sp2_mass);
+            const real_t sigma_cold         = magnetisation(B_ref, N_PER_SP * (sp1_mass + sp2_mass));
+            const real_t sigma_1_hot        = magnetisation(B_ref, N_TOTAL * enthalpy_per_particle_1);
+            const real_t sigma_2_hot        = magnetisation(B_ref, N_TOTAL * enthalpy_per_particle_2);
+            const real_t sigma_hot          = magnetisation(B_ref, w_enth);
+            const real_t sigma_1_cold_guide = magnetisation(B_guide, N_TOTAL * sp1_mass);
+            const real_t sigma_2_cold_guide = magnetisation(B_guide, N_TOTAL * sp2_mass);
+            const real_t sigma_cold_guide   = magnetisation(B_guide, N_PER_SP * (sp1_mass + sp2_mass));
+            const real_t sigma_1_hot_guide  = magnetisation(B_guide, N_TOTAL * enthalpy_per_particle_1);
+            const real_t sigma_2_hot_guide  = magnetisation(B_guide, N_TOTAL * enthalpy_per_particle_2);
+            const real_t sigma_hot_guide    = magnetisation(B_guide, w_enth);
+            const real_t vA_hot             = (real_t)std::sqrt((double)sigma_hot / (1.0 + (double)sigma_hot));   //* vA/c = sqrt(sigma_h / (1 + sigma_h))
 
-            //* electron gyroradius at gamma = 1 + sigma_hot: for sigma >> 1 this is the usual acceleration ceiling gamma ~ sigma,
-            //* and it stays defined for sigma < 1 (gamma = sigma alone would be below 1). Must stay well inside the box.
-            const real_t gamma_sigma = ONE + sigma_hot;
-            const real_t u_sigma     = (real_t)std::sqrt(std::max(0.0, (double)(gamma_sigma * gamma_sigma - ONE)));
-            const real_t rho_sigma   = larmor0 * u_sigma * sp1_mass / B_ref;
+            //! ---- kinetic scales --------------------------------------------------------------------
+            //!   d_s        = d0 sqrt(m_s / n_tot)        (cold)
+            //!   d_s        = d0 sqrt(m_s <g_s> / n_tot)  (hot, relativistic inertia)
+            //!   lambda_D,s = d0 sqrt(T_s / n_tot)        (no inertia factor; no cold value)
+            //!   plasma:    1/x^2 = sum_s (n_s/n_tot) / x_s^2   (NOT sum_s 1/x_s^2, which double-counts)
+            const double density_fraction = (double)N_PER_SP / (double)N_TOTAL;   //* n_s / n_tot, equal for both species
+            auto plasma_scale = [&](real_t scale_1, real_t scale_2) -> real_t { return (real_t)(1.0 / std::sqrt(density_fraction / SQR((double)scale_1) + density_fraction / SQR((double)scale_2))); };
+
+            const real_t skin_depth_1_cold      = skindepth0 * (real_t)std::sqrt((double)sp1_mass / (double)N_TOTAL);
+            const real_t skin_depth_2_cold      = skindepth0 * (real_t)std::sqrt((double)sp2_mass / (double)N_TOTAL);
+            const real_t skin_depth_plasma_cold = plasma_scale(skin_depth_1_cold, skin_depth_2_cold);
+            const real_t skin_depth_1_hot       = skindepth0 * (real_t)std::sqrt(g1 * (double)sp1_mass / (double)N_TOTAL);
+            const real_t skin_depth_2_hot       = skindepth0 * (real_t)std::sqrt(g2 * (double)sp2_mass / (double)N_TOTAL);
+            const real_t skin_depth_plasma_hot  = plasma_scale(skin_depth_1_hot, skin_depth_2_hot);
+
+            const real_t debye_length_1         = skindepth0 * (real_t)std::sqrt((double)temperature_1 / (double)N_TOTAL);
+            const real_t debye_length_2         = skindepth0 * (real_t)std::sqrt((double)temperature_2 / (double)N_TOTAL);
+            const real_t debye_length_plasma    = plasma_scale(debye_length_1, debye_length_2);   //* the grid criterion uses this (the finite-grid instability aliases the TOTAL charge)
+
+            //! thermal gyroradius with the thermal FOUR-velocity sqrt(<g>^2 - 1): rho_s = rho0 m_s sqrt(<g>^2 - 1) / |B|
+            const double thermal_four_velocity_1 = std::sqrt(std::max(0.0, g1 * g1 - 1.0));
+            const double thermal_four_velocity_2 = std::sqrt(std::max(0.0, g2 * g2 - 1.0));
+            const real_t rho_1                   = (real_t)((double)larmor0 * thermal_four_velocity_1 * (double)sp1_mass / (double)B_ref);
+            const real_t rho_2                   = (real_t)((double)larmor0 * thermal_four_velocity_2 * (double)sp2_mass / (double)B_ref);
+            //* thermal three-speed v_th,s = sqrt(<g>^2 - 1) / <g>; drifts above it can drive streaming instabilities (two-stream, Buneman)
+            const double thermal_speed_1         = thermal_four_velocity_1 / g1;
+            const double thermal_speed_2         = thermal_four_velocity_2 / g2;
+            const double drift_over_thermal_1    = (thermal_speed_1 > 0.0) ? (double)peak_u_drift_1 / thermal_speed_1 : 0.0;
+            const double drift_over_thermal_2    = (thermal_speed_2 > 0.0) ? (double)peak_u_drift_2 / thermal_speed_2 : 0.0;
+
+            //* confinement: gyroradius of a species-s particle holding the whole magnetic energy per particle, gamma_s = 1 + sigma_s,hot
+            //* (pair: 1 + sigma_hot, the usual gamma ~ sigma ceiling; ion-electron: electrons up to gamma ~ sigma_e ~ mu sigma). Must stay well inside the box.
+            auto confinement_radius = [&](real_t sigma_species_hot, real_t mass) -> real_t
+            {
+                const double gamma_ceiling = 1.0 + (double)sigma_species_hot;
+                return (real_t)((double)larmor0 * std::sqrt(gamma_ceiling * gamma_ceiling - 1.0) * (double)mass / (double)B_ref);
+            };
+            const real_t confinement_radius_1 = confinement_radius(sigma_1_hot, sp1_mass);
+            const real_t confinement_radius_2 = confinement_radius(sigma_2_hot, sp2_mass);
 
             //* shortest box side among the directions the spectrum spans
             real_t L_min = std::numeric_limits<real_t>::max();
-            if (turb_kplane != 1) L_min = std::min(L_min, Lx);   //* x1 active unless k in x2-x3
-            if (turb_kplane != 2) L_min = std::min(L_min, Ly);   //* x2 active unless k in x3-x1
+            if (turb_kplane != 1) L_min = std::min(L_min, Lx);
+            if (turb_kplane != 2) L_min = std::min(L_min, Ly);
             if ((D == Dim::_3D) && (turb_kplane != 0)) L_min = std::min(L_min, Lz);
-            const real_t l_outer = L_min / (real_t)kmin;                   //* largest driven wavelength [d0]
-            const real_t l_inner = L_min / (real_t)kmax;                   //* smallest driven wavelength [d0]
-            const real_t B_perturbed_over_guide = (B_guide != ZERO) ? B_perturbed_rms / math::abs(B_guide) : (real_t)-1.0;
+            const real_t l_outer = L_min / (real_t)kmin;   //* largest driven wavelength
+            const real_t l_inner = L_min / (real_t)kmax;   //* smallest driven wavelength
 
-            //* outer-scale eddy turnover t = 1 / (k_min u_perturbed_rms), k_min = 2 pi kmin / L = 2 pi / l_outer,
-            //* with the u_perturbed actually loaded (the Alfven target if perturb_velocity = false)
+            //* largest scale against the heavy-species skin depth (pair: plasma skin depth), smallest against the electron one
+            const real_t      skin_depth_large = is_pair ? skin_depth_plasma_hot : skin_depth_2_hot;
+            const std::string large_scale_name = is_pair ? "plasma" : "ion";
+
+            //* outer-scale eddy time t = 1 / (k_min u_perturbed_rms), k_min = 2 pi / l_outer (the Alfven target if no flow is loaded)
             const real_t u_eddy  = (u_perturbed_rms > ZERO) ? u_perturbed_rms : u_perturbed_rms_alfven;
             const real_t k_outer = (real_t)(2.0 * std::acos(-1.0)) / l_outer;
             const real_t t_eddy  = (u_eddy > ZERO) ? ONE / (k_outer * u_eddy) : ZERO;
 
+            //* omega_p,s t = t c / d_s with the species skin depth at n_tot (hot or cold inertia)
             const real_t runtime    = params.template get<simtime_t>("simulation.runtime");
-            //* plasma frequencies of the plasma as a whole (TOTAL density n0, species mass):
-            //*     omega_p,s = omega_p0 / sqrt(m_s <g_s>)  (hot),   omega_p0 / sqrt(m_s)  (cold),   omega_p0 = c / d0
-            const real_t t_wp1_hot  = runtime / (real_t)std::sqrt((double)(sp1_mass * g1));    //* [1/omega_p,e]
-            const real_t t_wp2_hot  = runtime / (real_t)std::sqrt((double)(sp2_mass * g2));    //* [1/omega_p,sp2]
-            const real_t t_wp1_cold = runtime / (real_t)std::sqrt((double)sp1_mass);
-            const real_t t_wp2_cold = runtime / (real_t)std::sqrt((double)sp2_mass);
-            const real_t t_cross = runtime / L_min;                                           //* light crossings
-            const real_t n_eddy  = (t_eddy > (real_t)0.0) ? runtime / t_eddy : (real_t)0.0;
+            const real_t t_wp1_hot  = runtime / skin_depth_1_hot;
+            const real_t t_wp2_hot  = runtime / skin_depth_2_hot;
+            const real_t t_wp1_cold = runtime / skin_depth_1_cold;
+            const real_t t_wp2_cold = runtime / skin_depth_2_cold;
+            const real_t t_cross    = runtime / L_min;                                    //* light crossings
+            const real_t n_eddy     = (t_eddy > ZERO) ? runtime / t_eddy : ZERO;
 
-            //! Pressures in units of n0 m0 c^2, so ratios are normalisation independent:
-            //!     P_s = n_s T_s,   U_B = sigma0 B^2 / 2,   plasma beta_s = P_s / U_B = 2 n_s T_s / (sigma0 B^2)
+            //! beta_s = P_s / U_B = 2 n_s T_s / (sigma0 B^2),  P_s = n_s T_s,  U_B = sigma0 B^2 / 2   [n0 m0 c^2]
             const real_t P_th_1 = N_PER_SP * temperature_1;
             const real_t P_th_2 = N_PER_SP * temperature_2;
             auto magnetic_pressure = [&](real_t B) -> real_t { return sigma0 * B * B / (real_t)2.0; };
@@ -1632,18 +1516,15 @@ namespace user
             const real_t U_B_guide    = magnetic_pressure(B_guide);
             const real_t beta_1_guide = (U_B_guide > ZERO) ? P_th_1 / U_B_guide : (real_t)-1.0;
             const real_t beta_2_guide = (U_B_guide > ZERO) ? P_th_2 / U_B_guide : (real_t)-1.0;
-            const real_t turb_frac    = (B_rms > (real_t)0.0) ? (B_perturbed_rms * B_perturbed_rms) / (B_rms * B_rms) : (real_t)0.0;
 
             //! =================================================================
-            //! SAMPLED DIAGNOSTICS, on the same host grid as the u_total cap
-            //! (sampling_counts). Two forms of curl(B) are compared at every sample:
-            //!
+            //! SAMPLED DIAGNOSTICS on the host grid of the u_total cap (sampling_counts)
             //!   curl_B     = -sum (kc x b) sin(k.x + ph)   mode-table curl (the drifts carry its sigma_h-corrected form)
-            //!   curl_B_yee = centred difference of B       what the Yee solver demands
-            //!
-            //! These should agree to round-off. A nonzero residual means the mode
-            //! table and the k~ correction have fallen out of step.
+            //!   curl_B_yee = one-cell centred difference   what the Yee solver demands; must agree to round-off
             //! =================================================================
+            auto dot   = [](const double (&a)[3], const double (&b)[3]) -> double { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; };
+            auto cross = [](const double (&a)[3], const double (&b)[3], double (&result)[3]) { result[0] = a[1] * b[2] - a[2] * b[1]; result[1] = a[2] * b[0] - a[0] * b[2]; result[2] = a[0] * b[1] - a[1] * b[0]; };
+
             auto B_host = [&](double X, double Y, double Z, double& B_x, double& B_y, double& B_z)
             {
                 host_cos_sum(B_perturbed_modes_host, X, Y, Z, B_x, B_y, B_z);
@@ -1655,19 +1536,17 @@ namespace user
                 host_cos_sum(u_perturbed_modes_host, X, Y, Z, u_perturbed_x, u_perturbed_y, u_perturbed_z);
             };
 
-            //* centred Yee difference over one cell, exactly as the FDTD curl does it
+            //* centred Yee difference over one cell, as the FDTD curl does it
             auto curl_B_yee_host = [&](double X, double Y, double Z, double& curl_B_yee_x, double& curl_B_yee_y, double& curl_B_yee_z)
             {
                 const double hx = (double)dx, hy = (double)dy, hz = (double)dz;
                 double bxp, byp, bzp, bxm, bym, bzm;
 
-                //* d/dx
                 B_host(X + 0.5 * hx, Y, Z, bxp, byp, bzp);
                 B_host(X - 0.5 * hx, Y, Z, bxm, bym, bzm);
                 const double dBy_dx = (byp - bym) / hx;
                 const double dBz_dx = (bzp - bzm) / hx;
 
-                //* d/dy
                 B_host(X, Y + 0.5 * hy, Z, bxp, byp, bzp);
                 B_host(X, Y - 0.5 * hy, Z, bxm, bym, bzm);
                 const double dBx_dy = (bxp - bxm) / hy;
@@ -1707,7 +1586,7 @@ namespace user
                 return div;
             };
 
-            //* E = -(u_motional x B), u_motional = u_perturbed + u_motional_coeff curl(B), mirroring InitFields::motional_E exactly
+            //* E = -(u_motional x B), u_motional = u_perturbed + u_motional_coeff J_first_order (mirrors InitFields::motional_E)
             auto E_host = [&](double X, double Y, double Z, double& Ex, double& Ey, double& Ez)
             {
                 double B_x, B_y, B_z, u_perturbed_x, u_perturbed_y, u_perturbed_z, curl_B_x, curl_B_y, curl_B_z;
@@ -1722,56 +1601,23 @@ namespace user
                 Ez = -(u_motional_x * B_y - u_motional_y * B_x);
             };
 
-            //* div(E) by the same one-cell centred differences the Yee divergence
-            //* uses, summed only over the SIMULATED directions (in 2D d/dz = 0, so
-            //* E_z carries no charge).
-            auto divE_host = [&](double X, double Y, double Z) -> double
-            {
-                const double hx = (double)dx, hy = (double)dy, hz = (double)dz;
-                double ep[3], em[3];
-
-                E_host(X + 0.5 * hx, Y, Z, ep[0], ep[1], ep[2]);
-                E_host(X - 0.5 * hx, Y, Z, em[0], em[1], em[2]);
-                double div = (ep[0] - em[0]) / hx;
-
-                E_host(X, Y + 0.5 * hy, Z, ep[0], ep[1], ep[2]);
-                E_host(X, Y - 0.5 * hy, Z, em[0], em[1], em[2]);
-                div += (ep[1] - em[1]) / hy;
-
-                if constexpr (D == Dim::_3D)
-                {
-                    E_host(X, Y, Z + 0.5 * hz, ep[0], ep[1], ep[2]);
-                    E_host(X, Y, Z - 0.5 * hz, em[0], em[1], em[2]);
-                    div += (ep[2] - em[2]) / hz;
-                }
-                return div;
-            };
-
             const std::array<int, 3> counts = sampling_counts(*this);
 
             long   n_samples = 0;
-            double curl_B_max = 0.0, curl_B_yee_max = 0.0;
-            double curl_B_deviation_max = 0.0;                          //* max |curl_B - curl_B_yee|
-            double divB_max = 0.0;                                      //* max |discrete div(B)|
-            double u_drift_sum_1 = 0.0, u_drift_sum_2 = 0.0;            //* |u_drift_species|
-            double u_perturbed_sum = 0.0;                               //* |u_perturbed|
-            double loaded_current_sq = 0.0, curl_B_sq_sum = 0.0;        //* |J_loaded|^2, |curl B|^2 (J_loaded = J_code/AMP)
-            double current_correction_sq = 0.0;                         //* |J_first_order - curl B|^2 (sigma_h split)
-            double convection_correction_sq = 0.0;                      //* |J_loaded - J_first_order|^2 (convection term)
-            double peak_u_total_loaded = 0.0;                           //* max |u_perturbed + u_drift_species| with the drift as loaded
-            double rho_analytic_sq = 0.0;                               //* (AMP div(E) / n)^2 from the analytic div(E) the convection term uses
-            double perp_reduction_sum = 0.0, perp_reduction_max = 0.0;  //* f = sigma_local / (1 + sigma_local)
-            double flow_lorentz_sum_1 = 0.0, flow_lorentz_sum_2 = 0.0;  //* Gamma of u_perturbed + u_drift_species, for the lab-frame <gamma>
+            double curl_B_yee_max = 0.0, curl_B_deviation_max = 0.0;              //* max |curl_B_yee|, max |curl_B - curl_B_yee|
+            double divB_max = 0.0;                                                //* max |discrete div(B)|
+            double B_peak = 0.0;                                                  //* max |B|
+            double peak_u_total_loaded = 0.0;                                     //* max |u_perturbed + u_drift_species| with the drift as loaded
+            double perp_reduction_sum = 0.0, perp_reduction_max = 0.0;            //* f = sigma_local / (1 + sigma_local)
+            double flow_lorentz_sum[2] = { 0.0, 0.0 }, inverse_flow_lorentz_sum[2] = { 0.0, 0.0 };   //* Gamma_s and 1/Gamma_s of u_total_species
 
-            //* current budget at t = 0:  required current A = AMP curl(B) = particle drift + convection + displacement, at every point [n0 e c]
+            //* current budget: A = AMP curl(B) = particle drift + convection + displacement at every point [n0 e c]
             double required_sq = 0.0, drift_dot_required = 0.0, convection_dot_required = 0.0, displacement_dot_required = 0.0;   //* projections on A: these add up
-            double particle_across_sq = 0.0, displacement_across_sq = 0.0;                                                         //* across A (the XY plane in 2D with turb_a_axis = 2)
+            double particle_across_sq = 0.0;                                                                                       //* across A (= displacement current across A)
             double displacement_sq = 0.0, displacement_along_B_sq = 0.0, displacement_theory_error_sq = 0.0;                       //* checks
 
-            double E_max = 0.0;                                         //* max |E| = |u_motional x B|
-            double E_ideal_sq = 0.0, E_hall_sq = 0.0;                   //* |u_perturbed x B|^2 and |(u_motional - u_perturbed) x B|^2
-            double rho_sq = 0.0, rho_max = 0.0;                         //* rho/n_tot = AMP div(E) / n_tot
-            double xi_sq = 0.0, xi_max = 0.0;                           //* |xi_s| = (AMP/n) |E|, one species
+            double E_ideal_sq = 0.0, E_hall_sq = 0.0;                             //* |u_perturbed x B|^2, |(u_motional - u_perturbed) x B|^2
+            double xi_max = 0.0;                                                  //* max |xi_s| = (AMP/n_tot) |E|
 
             if (mpi_rank == 0)
             for (int ix = 0; ix < counts[0]; ++ix)
@@ -1781,200 +1627,133 @@ namespace user
                         const double X = sample_coordinate((double)xmin, (double)Lx, ix, counts[0]);
                         const double Y = sample_coordinate((double)ymin, (double)Ly, iy, counts[1]);
                         const double Z = (D == Dim::_3D) ? sample_coordinate((double)zmin, (double)Lz, iz, counts[2]) : 0.0;
-
-                        double curl_B_x, curl_B_y, curl_B_z;
-                        host_curl_sum(B_perturbed_modes_host, X, Y, Z, curl_B_x, curl_B_y, curl_B_z);
-                        const double curl_B_magnitude = std::sqrt(curl_B_x * curl_B_x + curl_B_y * curl_B_y + curl_B_z * curl_B_z);
-
-                        double curl_B_yee_x, curl_B_yee_y, curl_B_yee_z;
-                        curl_B_yee_host(X, Y, Z, curl_B_yee_x, curl_B_yee_y, curl_B_yee_z);
-                        const double curl_B_yee_magnitude = std::sqrt(curl_B_yee_x * curl_B_yee_x + curl_B_yee_y * curl_B_yee_y + curl_B_yee_z * curl_B_yee_z);
-
-                        const double curl_B_deviation = std::sqrt(SQR(curl_B_x - curl_B_yee_x) + SQR(curl_B_y - curl_B_yee_y) + SQR(curl_B_z - curl_B_yee_z));
-
                         ++n_samples;
-                        curl_B_max     = std::max(curl_B_max, curl_B_magnitude);
-                        curl_B_yee_max = std::max(curl_B_yee_max, curl_B_yee_magnitude);
-                        curl_B_deviation_max = std::max(curl_B_deviation_max, curl_B_deviation);
-                        divB_max = std::max(divB_max, std::fabs(divB_host(X, Y, Z)));
 
-                        //* first-order current (sigma_h split; Hall part of E) and the drift current (adds the convection term)
-                        double first_order_current_x, first_order_current_y, first_order_current_z;
-                        host_first_order_current(B_perturbed_modes_host, (double)B_guide, (double)sigma_h_per_B_sq, X, Y, Z, first_order_current_x, first_order_current_y, first_order_current_z);
-                        double loaded_current_x, loaded_current_y, loaded_current_z;
-                        double div_E_analytic = 0.0;
-                        host_loaded_current(B_perturbed_modes_host, u_perturbed_modes_host, (double)B_guide, (double)sigma_h_per_B_sq, (double)u_motional_coeff, X, Y, Z, loaded_current_x, loaded_current_y, loaded_current_z, &div_E_analytic);
-                        rho_analytic_sq += SQR((double)AMP * div_E_analytic / (double)N_TOTAL);
-                        const double loaded_current_magnitude = std::sqrt(SQR(loaded_current_x) + SQR(loaded_current_y) + SQR(loaded_current_z));
-                        loaded_current_sq     += SQR(loaded_current_magnitude);
-                        curl_B_sq_sum         += SQR(curl_B_magnitude);
-                        current_correction_sq += SQR(first_order_current_x - curl_B_x) + SQR(first_order_current_y - curl_B_y) + SQR(first_order_current_z - curl_B_z);
-                        convection_correction_sq += SQR(loaded_current_x - first_order_current_x) + SQR(loaded_current_y - first_order_current_y) + SQR(loaded_current_z - first_order_current_z);
+                        //* fields at the sample
+                        double B_sample[3], u_perturbed[3], curl_B[3], curl_B_yee[3];
+                        B_host(X, Y, Z, B_sample[0], B_sample[1], B_sample[2]);
+                        u_perturbed_host(X, Y, Z, u_perturbed[0], u_perturbed[1], u_perturbed[2]);
+                        host_curl_sum(B_perturbed_modes_host, X, Y, Z, curl_B[0], curl_B[1], curl_B[2]);
+                        curl_B_yee_host(X, Y, Z, curl_B_yee[0], curl_B_yee[1], curl_B_yee[2]);
+                        const double B_sq = dot(B_sample, B_sample);
+                        B_peak = std::max(B_peak, std::sqrt(B_sq));
+
+                        //* mode-table curl vs Yee curl, and the discrete div(B)
+                        curl_B_yee_max       = std::max(curl_B_yee_max, std::sqrt(dot(curl_B_yee, curl_B_yee)));
+                        curl_B_deviation_max = std::max(curl_B_deviation_max, std::sqrt(SQR(curl_B[0] - curl_B_yee[0]) + SQR(curl_B[1] - curl_B_yee[1]) + SQR(curl_B[2] - curl_B_yee[2])));
+                        divB_max             = std::max(divB_max, std::fabs(divB_host(X, Y, Z)));
+
+                        //* first-order current (sigma_h split) and drift current (adds the convection term), both J/AMP
+                        double first_order_current[3], loaded_current[3], div_E_analytic = 0.0;
+                        host_first_order_current(B_perturbed_modes_host, (double)B_guide, (double)sigma_h_per_B_sq, X, Y, Z, first_order_current[0], first_order_current[1], first_order_current[2]);
+                        host_loaded_current(B_perturbed_modes_host, u_perturbed_modes_host, (double)B_guide, (double)sigma_h_per_B_sq, (double)u_motional_coeff, X, Y, Z, loaded_current[0], loaded_current[1], loaded_current[2], &div_E_analytic);
+
+                        //* f = sigma_local / (1 + sigma_local): share of J_perp carried by dE/dt
+                        const double sigma_local = (double)sigma_h_per_B_sq * B_sq;
+                        const double f_local     = sigma_local / (1.0 + sigma_local);
+                        perp_reduction_sum += f_local;
+                        perp_reduction_max  = std::max(perp_reduction_max, f_local);
+
+                        //* u_total_species = u_perturbed + u_drift_coeff_s J_loaded: peak speed, and Gamma_s = 1/sqrt(1 - u^2) below the 0.99c clamp
+                        const double u_drift_coeff[2] = { (double)u_drift_coeff_1, (double)u_drift_coeff_2 };
+                        for (int s = 0; s < 2; ++s)
                         {
-                            double B_sample_x, B_sample_y, B_sample_z;
-                            B_host(X, Y, Z, B_sample_x, B_sample_y, B_sample_z);
-                            const double sigma_local = (double)sigma_h_per_B_sq * (SQR(B_sample_x) + SQR(B_sample_y) + SQR(B_sample_z));
-                            const double f_local     = sigma_local / (1.0 + sigma_local);
-                            perp_reduction_sum += f_local;
-                            perp_reduction_max  = std::max(perp_reduction_max, f_local);
+                            double u_total[3];
+                            for (int i = 0; i < 3; ++i) { u_total[i] = u_perturbed[i] + u_drift_coeff[s] * loaded_current[i]; }
+                            const double u_total_sq   = dot(u_total, u_total);
+                            const double flow_lorentz = 1.0 / std::sqrt(1.0 - std::min(u_total_sq, 0.9801));
+                            peak_u_total_loaded          = std::max(peak_u_total_loaded, std::sqrt(u_total_sq));
+                            flow_lorentz_sum[s]         += flow_lorentz;
+                            inverse_flow_lorentz_sum[s] += 1.0 / flow_lorentz;
                         }
 
-                        //* u_drift_species = u_drift_coeff_s J_loaded
-                        u_drift_sum_1 += std::fabs((double)u_drift_coeff_1) * loaded_current_magnitude;
-                        u_drift_sum_2 += std::fabs((double)u_drift_coeff_2) * loaded_current_magnitude;
-
-                        double u_perturbed_x, u_perturbed_y, u_perturbed_z;
-                        u_perturbed_host(X, Y, Z, u_perturbed_x, u_perturbed_y, u_perturbed_z);
-                        u_perturbed_sum += std::sqrt(u_perturbed_x * u_perturbed_x + u_perturbed_y * u_perturbed_y + u_perturbed_z * u_perturbed_z);
-                        for (const double u_drift_coeff_s : { (double)u_drift_coeff_1, (double)u_drift_coeff_2 })
+                        //* current budget: A = AMP curl(B) = drift (AMP J_loaded) + convection (rho u_convection) + displacement (AMP dE/dt)
                         {
-                            peak_u_total_loaded = std::max(peak_u_total_loaded, std::sqrt(SQR(u_perturbed_x + u_drift_coeff_s * loaded_current_x) + SQR(u_perturbed_y + u_drift_coeff_s * loaded_current_y) + SQR(u_perturbed_z + u_drift_coeff_s * loaded_current_z)));
-                        }
-
-                        //* bulk Lorentz factor of each species' flow, Gamma = 1 / sqrt(1 - u^2) (u is a three-velocity [c]; kept below the 0.99c clamp)
-                        {
-                            const double u_total_sq_1 = SQR(u_perturbed_x + (double)u_drift_coeff_1 * loaded_current_x) + SQR(u_perturbed_y + (double)u_drift_coeff_1 * loaded_current_y) + SQR(u_perturbed_z + (double)u_drift_coeff_1 * loaded_current_z);
-                            const double u_total_sq_2 = SQR(u_perturbed_x + (double)u_drift_coeff_2 * loaded_current_x) + SQR(u_perturbed_y + (double)u_drift_coeff_2 * loaded_current_y) + SQR(u_perturbed_z + (double)u_drift_coeff_2 * loaded_current_z);
-                            flow_lorentz_sum_1 += 1.0 / std::sqrt(1.0 - std::min(u_total_sq_1, 0.9801));
-                            flow_lorentz_sum_2 += 1.0 / std::sqrt(1.0 - std::min(u_total_sq_2, 0.9801));
-                        }
-
-                        //* current budget:  A = AMP curl(B) = particle drift (AMP J_loaded) + convection (rho u_convection) + displacement (AMP dE/dt)
-                        {
-                            const double amp             = (double)AMP;
-                            const double rho_sample      = amp * div_E_analytic;                                                 //* polarisation charge [n0 e]
-                            const double u_convection[3] = { u_perturbed_x + 0.5 * (double)u_motional_coeff * first_order_current_x,   //* (u_perturbed + u_motional)/2
-                                                             u_perturbed_y + 0.5 * (double)u_motional_coeff * first_order_current_y,
-                                                             u_perturbed_z + 0.5 * (double)u_motional_coeff * first_order_current_z };
-                            const double required[3]     = { amp * curl_B_x, amp * curl_B_y, amp * curl_B_z };
-                            const double drift[3]        = { amp * loaded_current_x, amp * loaded_current_y, amp * loaded_current_z };
-                            double convection[3], particle[3], displacement[3];
+                            const double amp        = (double)AMP;
+                            const double rho_sample = amp * div_E_analytic;   //* polarisation charge [n0 e]
+                            double required[3], drift[3], convection[3], particle[3], displacement[3];
                             for (int i = 0; i < 3; ++i)
                             {
-                                convection[i]   = rho_sample * u_convection[i];
+                                const double u_convection = u_perturbed[i] + 0.5 * (double)u_motional_coeff * first_order_current[i];   //* (u_perturbed + u_motional)/2
+                                required[i]     = amp * curl_B[i];
+                                drift[i]        = amp * loaded_current[i];
+                                convection[i]   = rho_sample * u_convection;
                                 particle[i]     = drift[i] + convection[i];
                                 displacement[i] = required[i] - particle[i];
                             }
-                            auto dot = [](const double (&a)[3], const double (&b)[3]) -> double { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; };
 
-                            //* projections on A add up, because A = drift + convection + displacement at every point
+                            //* projections on A add up because A = drift + convection + displacement at every point
                             const double required_magnitude_sq = dot(required, required);
                             required_sq               += required_magnitude_sq;
                             drift_dot_required        += dot(drift, required);
                             convection_dot_required   += dot(convection, required);
                             displacement_dot_required += dot(displacement, required);
 
-                            //* parts across A: A has none there, so particles and displacement current are equal and opposite
+                            //* across A, particle current and displacement current are equal and opposite
                             if (required_magnitude_sq > 0.0)
                             {
-                                const double particle_along     = dot(particle, required) / required_magnitude_sq;
-                                const double displacement_along = dot(displacement, required) / required_magnitude_sq;
-                                for (int i = 0; i < 3; ++i)
-                                {
-                                    particle_across_sq     += SQR(particle[i] - particle_along * required[i]);
-                                    displacement_across_sq += SQR(displacement[i] - displacement_along * required[i]);
-                                }
+                                const double particle_along = dot(particle, required) / required_magnitude_sq;
+                                for (int i = 0; i < 3; ++i) { particle_across_sq += SQR(particle[i] - particle_along * required[i]); }
                             }
 
-                            //* checks: no displacement current along B; displacement current = f (A - rho u_convection) across B
-                            double B_sample[3];
-                            B_host(X, Y, Z, B_sample[0], B_sample[1], B_sample[2]);
-                            const double B_sq = dot(B_sample, B_sample);
+                            //* checks: no displacement current along B; displacement current = f (A - rho u_convection)_perp
                             displacement_sq += dot(displacement, displacement);
                             if (B_sq > 0.0)
                             {
-                                const double sigma_local = (double)sigma_h_per_B_sq * B_sq;
-                                const double f_local     = sigma_local / (1.0 + sigma_local);
                                 displacement_along_B_sq += SQR(dot(displacement, B_sample)) / B_sq;
                                 double source[3];
                                 for (int i = 0; i < 3; ++i) { source[i] = required[i] - convection[i]; }
                                 const double source_along_B_over_B = dot(source, B_sample) / B_sq;
-                                for (int i = 0; i < 3; ++i)
-                                {
-                                    const double displacement_theory = f_local * (source[i] - source_along_B_over_B * B_sample[i]);
-                                    displacement_theory_error_sq += SQR(displacement[i] - displacement_theory);
-                                }
+                                for (int i = 0; i < 3; ++i) { displacement_theory_error_sq += SQR(displacement[i] - f_local * (source[i] - source_along_B_over_B * B_sample[i])); }
                             }
                         }
 
-                        //! ---- motional field and the charge density it demands ----
-                        //! E = -(u_motional x B) is what InitFields::ex1/ex2/ex3 writes, split
-                        //! here into its ideal part -(u_perturbed x B) and its Hall part
-                        //! -(u_motional_coeff curl(B) x B). rho is sampled as AMP * div(E) with
-                        //! the SAME one-cell centred differences the Yee divergence uses, so
-                        //! this is the discrete constraint the code will actually see.
-                        double B_x, B_y, B_z;
-                        B_host(X, Y, Z, B_x, B_y, B_z);
-                        const double E_ideal_x = -(u_perturbed_y * B_z - u_perturbed_z * B_y);
-                        const double E_ideal_y = -(u_perturbed_z * B_x - u_perturbed_x * B_z);
-                        const double E_ideal_z = -(u_perturbed_x * B_y - u_perturbed_y * B_x);
-                        const double hall_x    = (double)u_motional_coeff * first_order_current_x, hall_y = (double)u_motional_coeff * first_order_current_y, hall_z = (double)u_motional_coeff * first_order_current_z;
-                        const double E_hall_x  = -(hall_y * B_z - hall_z * B_y);
-                        const double E_hall_y  = -(hall_z * B_x - hall_x * B_z);
-                        const double E_hall_z  = -(hall_x * B_y - hall_y * B_x);
-                        E_ideal_sq += SQR(E_ideal_x) + SQR(E_ideal_y) + SQR(E_ideal_z);
-                        E_hall_sq  += SQR(E_hall_x) + SQR(E_hall_y) + SQR(E_hall_z);
-
-                        const double E_magnitude = std::sqrt(SQR(E_ideal_x + E_hall_x) + SQR(E_ideal_y + E_hall_y) + SQR(E_ideal_z + E_hall_z));
-                        E_max = std::max(E_max, E_magnitude);
-
-                        const double divE = divE_host(X, Y, Z);
-                        const double rho  = (double)AMP * divE / (double)N_TOTAL;
-                        rho_sq += rho * rho;
-                        rho_max = std::max(rho_max, std::fabs(rho));
-
-                        //* per-species displacement applied in load_charge_density
-                        const double xi = (double)AMP / (double)N_TOTAL * E_magnitude;
-                        xi_sq += xi * xi;
-                        xi_max = std::max(xi_max, xi);
+                        //* motional E = -(u x B) = B x u, split into ideal (u_perturbed) and Hall (u_motional_coeff J_first_order) parts; |xi_s| = (AMP/n_tot) |E|
+                        double hall_velocity[3], E_ideal[3], E_hall[3];
+                        for (int i = 0; i < 3; ++i) { hall_velocity[i] = (double)u_motional_coeff * first_order_current[i]; }
+                        cross(B_sample, u_perturbed, E_ideal);
+                        cross(B_sample, hall_velocity, E_hall);
+                        double E_total[3];
+                        for (int i = 0; i < 3; ++i) { E_total[i] = E_ideal[i] + E_hall[i]; }
+                        E_ideal_sq += dot(E_ideal, E_ideal);
+                        E_hall_sq  += dot(E_hall, E_hall);
+                        xi_max      = std::max(xi_max, (double)AMP / (double)N_TOTAL * std::sqrt(dot(E_total, E_total)));
                     }
 
-            const double inv_n              = (n_samples > 0) ? 1.0 / (double)n_samples : 0.0;
-            const double u_drift_mean_1     = u_drift_sum_1   * inv_n;
-            const double u_drift_mean_2     = u_drift_sum_2   * inv_n;
-            const double u_perturbed_mean   = u_perturbed_sum * inv_n;
-            //* lab-frame mean Lorentz factor: an isotropic rest-frame distribution boosted by Gamma has <gamma_lab> = Gamma <g>
-            const double gamma_lab_1        = flow_lorentz_sum_1 * inv_n * (double)g1;
-            const double gamma_lab_2        = flow_lorentz_sum_2 * inv_n * (double)g2;
-            const double rho_rms            = std::sqrt(rho_sq * inv_n);
-            const double rho_analytic_rms   = std::sqrt(rho_analytic_sq * inv_n);
-            const double xi_rms             = std::sqrt(xi_sq  * inv_n);
-            const double dx_d               = (double)dx;
-            const double xi_cells           = (dx_d > 0.0) ? xi_rms / dx_d : 0.0;
-            const double ampere_deviation   = (curl_B_yee_max > 0.0) ? curl_B_deviation_max / curl_B_yee_max : 0.0;
-            const double curl_B_ratio_max   = (curl_B_yee_max > 0.0) ? curl_B_max / curl_B_yee_max : 0.0;
-            const double divB_over_curlB    = (curl_B_yee_max > 0.0) ? divB_max / curl_B_yee_max : 0.0;
-            const bool   E_ideal_present    = (E_ideal_sq > 0.0);
-            const double E_hall_over_ideal  = E_ideal_present ? std::sqrt(E_hall_sq / E_ideal_sq) : 0.0;
-            const double loaded_over_curl   = (curl_B_sq_sum > 0.0) ? std::sqrt(loaded_current_sq / curl_B_sq_sum) : 0.0;        //* RMS |J_loaded| / RMS |curl B|
-            const double correction_size    = (curl_B_sq_sum > 0.0) ? std::sqrt(current_correction_sq / curl_B_sq_sum) : 0.0;    //* RMS |J_first_order - curl B| / RMS |curl B|
-            const double convection_size    = (curl_B_sq_sum > 0.0) ? std::sqrt(convection_correction_sq / curl_B_sq_sum) : 0.0; //* RMS |J_loaded - J_first_order| / RMS |curl B|
+            const double inv_n = (n_samples > 0) ? 1.0 / (double)n_samples : 0.0;
+            //* lab-frame mean Lorentz factor of a Juttner species boosted by Gamma: <gamma_lab> = T^00 / N = Gamma <g> + theta (Gamma - 1/Gamma)
+            const double gamma_lab_1 = (flow_lorentz_sum[0] * g1 + (double)theta_1 * (flow_lorentz_sum[0] - inverse_flow_lorentz_sum[0])) * inv_n;
+            const double gamma_lab_2 = (flow_lorentz_sum[1] * g2 + (double)theta_2 * (flow_lorentz_sum[1] - inverse_flow_lorentz_sum[1])) * inv_n;
+
+            const double ampere_deviation    = (curl_B_yee_max > 0.0) ? curl_B_deviation_max / curl_B_yee_max : 0.0;
+            const double divB_over_curlB     = (curl_B_yee_max > 0.0) ? divB_max / curl_B_yee_max : 0.0;
+            const bool   E_ideal_present     = (E_ideal_sq > 0.0);
+            const double E_hall_over_ideal   = E_ideal_present ? std::sqrt(E_hall_sq / E_ideal_sq) : 0.0;
             const double perp_reduction_mean = perp_reduction_sum * inv_n;
-            //* actual bulk-kinetic / magnetic perturbation energy, (w u^2 / 2) / (sigma0 dB^2 / 2) for a non-relativistic flow; s^2 is this ratio only in Alfven units
-            const double bulk_to_magnetic   = (B_perturbed_rms > ZERO) ? (double)w_enth * SQR((double)u_perturbed_rms) / ((double)sigma0 * SQR((double)B_perturbed_rms)) : 0.0;
-            //* values along A [n0 e c]: <X . A> / A_rms, so particle drift + convection + displacement = A_rms exactly
-            const double required_rms             = std::sqrt(required_sq * inv_n);
-            const double drift_along              = (required_rms > 0.0) ? drift_dot_required * inv_n / required_rms : 0.0;
-            const double convection_along         = (required_rms > 0.0) ? convection_dot_required * inv_n / required_rms : 0.0;
-            const double displacement_along       = (required_rms > 0.0) ? displacement_dot_required * inv_n / required_rms : 0.0;
-            const double particle_across_rms      = std::sqrt(particle_across_sq * inv_n);
-            const double displacement_across_rms  = std::sqrt(displacement_across_sq * inv_n);
-            const double displacement_rms         = std::sqrt(displacement_sq * inv_n);
-            const double displacement_along_B     = (required_rms > 0.0) ? std::sqrt(displacement_along_B_sq * inv_n) / required_rms : 0.0;
-            const double displacement_theory_rel  = (displacement_rms > 0.0) ? std::sqrt(displacement_theory_error_sq * inv_n) / displacement_rms : 0.0;
+            //* bulk-kinetic / magnetic perturbation energy, (w u^2 / 2) / (sigma0 dB^2 / 2), non-relativistic flow
+            const double bulk_to_magnetic    = (B_perturbed_rms > ZERO) ? (double)w_enth * SQR((double)u_perturbed_rms) / ((double)sigma0 * SQR((double)B_perturbed_rms)) : 0.0;
+            //* values along A [n0 e c]: <X . A> / A_rms, so drift + convection + displacement = A_rms exactly
+            const double required_rms            = std::sqrt(required_sq * inv_n);
+            const double drift_along             = (required_rms > 0.0) ? drift_dot_required * inv_n / required_rms : 0.0;
+            const double convection_along        = (required_rms > 0.0) ? convection_dot_required * inv_n / required_rms : 0.0;
+            const double displacement_along      = (required_rms > 0.0) ? displacement_dot_required * inv_n / required_rms : 0.0;
+            const double particle_across_rms     = std::sqrt(particle_across_sq * inv_n);
+            const double displacement_rms        = std::sqrt(displacement_sq * inv_n);
+            const double displacement_along_B    = (required_rms > 0.0) ? std::sqrt(displacement_along_B_sq * inv_n) / required_rms : 0.0;
+            const double displacement_theory_rel = (displacement_rms > 0.0) ? std::sqrt(displacement_theory_error_sq * inv_n) / displacement_rms : 0.0;
+            //* Boris accuracy: cold electron gyration per step at the peak |B|, Omega_ce dt = dt |B|_max / (rho0 m_e); phase error ~ (Omega dt)^2 / 12
+            const double gyration_per_step       = (double)dt * B_peak / ((double)larmor0 * (double)sp1_mass);
+            const double peak_displacement_cells = xi_max / (double)dx;
 
             //! =================================================================
             //! UNLOADED DISPLACEMENT CURRENT AT t = 0 (estimate)
             //!
-            //! The drifts carry curl(B) minus the displacement current of the J x B acceleration (sigma_h
-            //! split). The rest of dE/dt at t = 0 is not loaded. With E = -(u_m x B), u_m the field-line
-            //! velocity, it is the change of E due to advection of the flow and of the field,
+            //! The drifts carry curl(B) minus the displacement current of the J x B acceleration (sigma_h split). The rest of dE/dt at t = 0,
+            //! with E = -(u_m x B) and u_m the field-line velocity, is not loaded:
             //!     D = [(u_m . grad) u_m] x B - u_m x dB/dt,        dB/dt = -curl(E).
-            //! Its part across B is the advective dE_perp/dt; its part along B equals E.curl(E)/|B|, the
-            //! parallel displacement current that keeps E.B = 0. Relative to the required current
-            //! AMP curl(B), each is |D|/|curl B| (AMP cancels), as box RMS values. Derivatives are centred
-            //! differences of the host mode sums, on at most 64 points per axis (32 in 3D). As a check, dB/dt is also
-            //! computed from the product rule, curl(u_m x B) = u_m div(B) - B div(u_m) + (B.grad)u_m - (u_m.grad)B.
+            //! Across B: the advective dE_perp/dt. Along B: E.curl(E)/|B|, the parallel displacement current that keeps E.B = 0.
+            //! Reported as RMS fractions of AMP curl(B) (AMP cancels). Centred differences of the host mode sums on at most 64 points per axis
+            //! (32 in 3D); dB/dt is cross-checked with curl(u_m x B) = u_m div(B) - B div(u_m) + (B.grad)u_m - (u_m.grad)B.
             //! =================================================================
             auto u_motional_host = [&](double X, double Y, double Z, double (&u_motional)[3])
             {
@@ -1984,16 +1763,16 @@ namespace user
                 for (int i = 0; i < 3; ++i) { u_motional[i] = u_perturbed_value[i] + (double)u_motional_coeff * current[i]; }
             };
 
-            const bool   E_present    = E_ideal_present || (u_motional_coeff != ZERO);
-            const double fd_step      = 1.0e-3 * (double)l_inner;          //* well below the shortest injected wavelength
-            const int    n_axes       = (D == Dim::_3D) ? 3 : 2;            //* simulated directions; d/dz = 0 in 2D
+            const bool   E_present = E_ideal_present || (u_motional_coeff != ZERO);
+            const double fd_step   = 1.0e-3 * (double)l_inner;          //* well below the shortest injected wavelength
+            const int    n_axes    = (D == Dim::_3D) ? 3 : 2;            //* simulated directions; d/dz = 0 in 2D
             double unloaded_perp_sq = 0.0, unloaded_par_sq = 0.0, unloaded_curl_B_sq = 0.0;
             double dB_dt_sq = 0.0, dB_dt_mismatch_sq = 0.0;
 
             if (mpi_rank == 0 && E_present)
             {
                 std::array<int, 3> estimate_counts;
-                const int max_points_per_axis = (D == Dim::_3D) ? 32 : 64;   //* the RMS needs few samples; keeps the 3D setup cheap
+                const int max_points_per_axis = (D == Dim::_3D) ? 32 : 64;
                 for (int a = 0; a < 3; ++a) { estimate_counts[a] = std::min(counts[a], max_points_per_axis); }
 
                 for (int ix = 0; ix < estimate_counts[0]; ++ix)
@@ -2082,13 +1861,13 @@ namespace user
                 return text_stream.str();
             };
 
-            //* x as a percentage of the RMS required current, one decimal (own stream, so the printout's number format is untouched)
+            //* x as a percentage of the RMS required current, one decimal
             auto percent_of_required = [&](double x) -> std::string
             {
                 if (required_rms <= 0.0) { return "n/a"; }
-                std::ostringstream percent_text;
-                percent_text << std::fixed << std::setprecision(1) << 100.0 * x / required_rms << "%";
-                return percent_text.str();
+                std::ostringstream text_stream;
+                text_stream << std::fixed << std::setprecision(1) << 100.0 * x / required_rms << "%";
+                return text_stream.str();
             };
 
             double peak_displacement = xi_max;
@@ -2103,10 +1882,8 @@ namespace user
             const double current_share_1 = inv_h_1 / (inv_h_1 + inv_h_2);
             const double current_share_2 = inv_h_2 / (inv_h_1 + inv_h_2);
 
-            //! Normalised cross-helicity sigma_c = <u_perturbed . B_perturbed> / (u_perturbed_rms B_perturbed_rms).
-            //! Distinct modes are orthogonal over the box, so <u_perturbed . B_perturbed> = 0.5 sum_m (u_m . b_m)
-            //! cos(psi_m - phi_m) for tables that list the same k in the same order
-            //! (same band, kplane and a_axis), which is checked mode by mode.
+            //! Normalised cross-helicity sigma_c = <u_perturbed . B_perturbed> / (u_perturbed_rms B_perturbed_rms). Distinct modes are orthogonal
+            //! over the box, so <u . B> = 0.5 sum_m (u_m . b_m) cos(psi_m - phi_m) when both tables list the same k in the same order (checked).
             double cross_correlation = 0.0;
             bool   tables_paired     = !u_perturbed_modes_host.empty() && (u_perturbed_modes_host.size() == B_perturbed_modes_host.size());
             for (std::size_t m = 0; tables_paired && m < B_perturbed_modes_host.size(); ++m)
@@ -2120,10 +1897,9 @@ namespace user
             const bool   sigma_c_valid = tables_paired && (u_perturbed_rms > ZERO) && (B_perturbed_rms > ZERO);
             const double sigma_c       = sigma_c_valid ? cross_correlation / ((double)u_perturbed_rms * (double)B_perturbed_rms) : 0.0;
 
-            //* Empirical estimates for MOMENTUM-conserving PIC cluster around lambda_D / dx = 1/pi ~ 0.32
+            //* empirical floor of the finite-grid instability, applied to the COLLECTIVE Debye length
             constexpr real_t DEBYE_FLOOR = static_cast<real_t>(1.0) / static_cast<real_t>(3.0);
-            //* applied to the COLLECTIVE Debye length, not a per-species one
-            const real_t     lD_ratio    = lambda_Dpl / dx;
+            const real_t     lD_ratio    = debye_length_plasma / dx;
 
             constexpr int LW1 = 44;
             constexpr int LW2 = 40;
@@ -2139,65 +1915,77 @@ namespace user
                                           : (turb_kplane == 2) ? "k in ZX plane" : "isotropic 3D";
 
             const std::string apol_name = (turb_a_axis >= 0 && turb_a_axis <= 2)
-                                        ? std::string("A = A_") + axis_name[turb_a_axis] + " e_" +
-                                          axis_name[turb_a_axis] + "  (B_perturbed _|_ " + axis_name[turb_a_axis] + ")"
+                                        ? std::string("A = A_") + axis_name[turb_a_axis] + " e_" + axis_name[turb_a_axis] + "  (B_perturbed _|_ " + axis_name[turb_a_axis] + ")"
                                         : std::string("random, A _|_ k");
 
-            //* curl(B) lies along Z in 2D (k in the XY plane, vector potential along Z); in 3D it can point in any direction
+            //* curl(B) lies along Z in 2D (k in the XY plane, A along Z); in 3D it can point anywhere
             const std::string budget_along  = (D == Dim::_2D) ? "along Z" : "parallel to curl(B)";
             const std::string budget_across = (D == Dim::_2D) ? "in the XY plane" : "perpendicular to curl(B)";
             const std::string across_note   = (D == Dim::_2D) ? "; along the tilted B-field lines" : "";
-
-            std::ostringstream sampling_grid_text;
-            sampling_grid_text << counts[0] << " x " << counts[1];
-            if constexpr (D == Dim::_3D) { sampling_grid_text << " x " << counts[2]; }
 
             std::ostringstream oss;
             oss << "\n"
                 << "===========================================================\n"
                 << title << "\n"
-                << "===========================================================\n\n"
-                << "GEOMETRY (Periodic Boundaries) \n"
+                << "===========================================================\n\n";
+
+            //! ---- GEOMETRY ----
+            oss << "GEOMETRY (periodic; lengths, times and fields in code units, c = 1)\n"
                 << kv1("Dimensionality") << (int)D << "D\n";
-            if constexpr (M::Dim == Dim::_3D)
+            if constexpr (D == Dim::_3D)
             {
                 const auto nx3 = metadomain.mesh().n_active(in::x3);
                 oss << kv1("Resolution") << nx1 << " x " << nx2 << " x " << nx3 << "\n"
-                    << kv1("Box (Lx x Ly x Lz) [d0]") << Lx << " x " << Ly << " x " << Lz << "\n";
+                    << kv1("Box (Lx x Ly x Lz)") << Lx << " x " << Ly << " x " << Lz << "\n";
             }
             else
             {
                 oss << kv1("Resolution") << nx1 << " x " << nx2 << "\n"
-                    << kv1("Box (Lx x Ly) [d0]") << Lx << " x " << Ly << "\n";
+                    << kv1("Box (Lx x Ly)") << Lx << " x " << Ly << "\n";
             }
-            oss << kv1("Grid size [d0]") << dx << "\n"
-                << kv1("Runtime [omega_p,e t] (n0 total)") << t_wp1_hot << "  (hot; cold = " << t_wp1_cold << ")\n"
-                << kv1("Runtime [omega_p," + sp2_tag + " t] (n0 total)") << t_wp2_hot << "  (hot; cold = " << t_wp2_cold << ")\n"
+            oss << kv1("Grid size dx") << dx << "\n"
+                << kv1("Time step dt") << dt << "\n"
+                << kv1("Current filter passes") << integer_text(current_filters) << "\n"
+                << kv1("Deposit shape order") << integer_text(deposit_order) << "\n"
+                << kv1("d0 = skindepth0, rho0 = larmor0") << skindepth0 << ", " << larmor0 << "\n"
+                << kv1("Runtime [omega_p,e t]") << t_wp1_hot << "  (hot; cold = " << t_wp1_cold << ")\n"
+                << kv1("Runtime [omega_p," + sp2_tag + " t]") << t_wp2_hot << "  (hot; cold = " << t_wp2_cold << ")\n"
                 << kv1("Runtime [L/c]") << t_cross << "\n"
-                << kv1("Runtime [outer eddy times]") << n_eddy << "\n\n"
+                << kv1("Runtime [outer eddy times]") << n_eddy << "\n\n";
 
-
-                << "MASS, MAGNETIC FIELD, AND MAGNETISATION (at B = B_rms unless stated) \n"
-                << kv1("B_rms [B0]") << B_rms << "\n"
-                << kv1("Guide field [B0]") << B_guide << "  (along Z)\n"
-                << kv1("B_perturbed RMS (target) [B0]") << B_perturbed_rms << "\n"
-                << kv1("B_perturbed RMS (X, Y, Z) [B0]") << "(" << B_perturbed_rms_component[0] << ", " 
-                                                                << B_perturbed_rms_component[1] << ", " 
-                                                                << B_perturbed_rms_component[2] << ")\n"
-                << kv1("B_perturbed_rms / |B_guide|") << B_perturbed_over_guide << "  (-1 => zero guide field)\n"
-                << kv1("Mass ratio [m_2/m_1]") << mass_ratio << "\n"
-                << kv1("sigma0 = (d0/rho0)^2") << sigma0 << "  (fiducial species at B = 1)\n"
-                << kv1("Sigma (electron, cold)") << sigma_1_cold << "\n"
-                << kv1("Sigma (" + sp2 + ", cold)") << sigma_2_cold << "\n"
-                << kv1("Sigma (plasma, cold)") << sigma_cold << "\n"
-                << kv1("Sigma (plasma, hot)") << sigma_hot << "\n"
+            //! ---- MAGNETIC FIELD AND MAGNETISATION ----
+            oss << "MAGNETIC FIELD AND MAGNETISATION (at B = B_rms unless stated)\n"
+                << kv1("B_rms") << B_rms << "\n"
+                << kv1("Guide field (along Z)") << B_guide << "\n"
+                << kv1("B_perturbed RMS") << B_perturbed_rms << "\n"
+                << kv1("B_perturbed RMS (X, Y, Z)") << "(" << B_perturbed_rms_component[0] << ", " << B_perturbed_rms_component[1] << ", " << B_perturbed_rms_component[2] << ")\n"
+                << kv1("B_perturbed^2 / B_guide^2") << ((B_guide != ZERO) ? (B_perturbed_rms * B_perturbed_rms) / (B_guide * B_guide) : (real_t)-1.0) << "  (-1: B_guide = 0)\n"
+                << kv1("Mass ratio m_2/m_1") << mass_ratio << "\n"
+                << kv1("sigma0 = (d0/rho0)^2") << sigma0 << "\n"
+                << "\tMagnetisation, cold (at B_rms)\n"
+                << kv2("Electrons") << sigma_1_cold << "\n"
+                << kv2(SP2u) << sigma_2_cold << "\n"
+                << kv2("Plasma") << sigma_cold << "\n"
+                << "\tMagnetisation, hot (at B_rms)\n"
+                << kv2("Electrons") << sigma_1_hot << "\n"
+                << kv2(SP2u) << sigma_2_hot << "\n"
+                << kv2("Plasma") << sigma_hot << "\n"
+                << "\tMagnetisation, cold (at B_guide)\n"
+                << kv2("Electrons") << sigma_1_cold_guide << "\n"
+                << kv2(SP2u) << sigma_2_cold_guide << "\n"
+                << kv2("Plasma") << sigma_cold_guide << "\n"
+                << "\tMagnetisation, hot (at B_guide)\n"
+                << kv2("Electrons") << sigma_1_hot_guide << "\n"
+                << kv2(SP2u) << sigma_2_hot_guide << "\n"
+                << kv2("Plasma") << sigma_hot_guide << "\n"
                 << kv1("Enthalpy w [n0 m0 c^2]") << w_enth << "  (= sum_s n_s (m_s <g_s> + T_s))\n"
-                << kv1("Alfven speed [c] (cold)") << vA_cold << "\n"
-                << kv1("Alfven speed [c] (hot)") << vA_hot << "\n"
-                << kv1("Mean Lorentz factor electrons (fluid)") << g1 << "  (thermal, fluid frame)\n"
-                << kv1("Mean Lorentz factor electrons (lab)") << gamma_lab_1 << "  (with bulk flow and drift)\n"
-                << kv1("Mean Lorentz factor " + sp2s + " (fluid)") << g2 << "  (thermal, fluid frame)\n"
-                << kv1("Mean Lorentz factor " + sp2s + " (lab)") << gamma_lab_2 << "  (with bulk flow and drift)\n"
+                << kv1("Alfven speed (hot) [c]") << vA_hot << "\n"
+                << "\tMean Lorentz factor, species rest frame (thermal only)\n"
+                << kv2("Electrons") << g1 << "\n"
+                << kv2(SP2u) << g2 << "\n"
+                << "\tMean Lorentz factor, simulation frame (box mean, with bulk flow and drift)\n"
+                << kv2("Electrons") << gamma_lab_1 << "\n"
+                << kv2(SP2u) << gamma_lab_2 << "\n"
                 << "\tPlasma beta (at B_rms)\n"
                 << kv2("Electrons") << beta_1_rms << "\n"
                 << kv2(SP2u) << beta_2_rms << "\n"
@@ -2207,82 +1995,60 @@ namespace user
                 oss << "\tPlasma beta (at B_guide)\n"
                     << kv2("Electrons") << beta_1_guide << "\n"
                     << kv2(SP2u) << beta_2_guide << "\n"
-                    << kv2("Plasma") << beta_1_guide + beta_2_guide << "\n";
+                    << kv2("Plasma") << beta_1_guide + beta_2_guide << "\n\n";
             }
             else
             {
-                oss << kv1("Plasma beta (at B_guide)") << "n/a (B_guide = 0)\n";
+                oss << kv1("Plasma beta (at B_guide)") << "n/a (B_guide = 0)\n\n";
             }
-            oss << kv1("B_perturbed^2 / B_rms^2 (turb frac)") << turb_frac << "\n"
-                << kv1("B_perturbed^2 / B_guide^2") << ((B_guide != ZERO) ? (B_perturbed_rms * B_perturbed_rms) / (B_guide * B_guide) : (real_t)-1.0) << "\n\n"
 
-
-                << "TURBULENCE SPECTRUM \n"
+            //! ---- TURBULENCE SPECTRUM ----
+            oss << "TURBULENCE SPECTRUM\n"
                 << kv1("Mode band [kmin, kmax]") << "[" << kmin << ", " << kmax << "]\n"
                 << kv1("Number of modes") << B_perturbed_modes_host.size() << "\n"
-                << kv1("Spectral slope (E(k) ~ k^slope)") << energy_spectrum_slope << "  (0 = flat shell spectrum E(k); slope " << kspace_dim(turb_kplane, D == Dim::_3D) - 1 << " = equal energy per mode)\n"
+                << kv1("Phase seed of B_perturbed") << B_seed << "\n"
+                << kv1("Spectral slope (E(k) ~ k^slope)") << energy_spectrum_slope << "  (0 = flat; " << kspace_dim(turb_kplane, D == Dim::_3D) - 1 << " = equal energy per mode)\n"
                 << kv1("Random mode amplitudes") << (turb_rand_amp ? "YES" : "NO") << "\n"
                 << kv1("k-space") << kplane_name << "\n"
                 << kv1("Vector potential") << apol_name << "\n"
-                << kv1("Largest driven scale L/kmin [d0]") << l_outer << "  (wavelength; " << l_outer / d_plasma << " plasma skin depths)\n"
-                << kv1("Smallest driven scale L/kmax [d0]") << l_inner << "  (wavelength; resolved with " << l_inner / dx << " cells)\n"
-                << kv1("Eddy time 1/(k_min u_perturbed_rms)") << t_eddy << "  [d0/c]  (k_min = 2 pi kmin / L)" << ((u_perturbed_rms > ZERO) ? "" : "  (Alfven target; no flow loaded)") << "\n\n"
+                << kv1("Largest driven wavelength L/kmin") << l_outer << "  (" << l_outer / skin_depth_large << " " << large_scale_name << " skin depths)\n"
+                << kv1("Smallest driven wavelength L/kmax") << l_inner << "  (" << l_inner / skin_depth_1_hot << " electron skin depths; " << l_inner / dx << " cells)\n"
+                << kv1("Eddy time 1/(k_min u_perturbed_rms)") << t_eddy << ((u_perturbed_rms > ZERO) ? "" : "  (Alfven target; no flow loaded)") << "\n\n";
 
-
-                << "CURRENT \n"  
-                << "\tJ_code = AMP [curl(B) - f (curl B)_perp] = sum_s n_s q_s u_drift_species\n"
-                << "\tf = sigma_h/(1 + sigma_h), with the local sigma_h\n"
-                << kv1("AMP [d0^2/r0]") << AMP << "\n"
-                << kv1("Displacement share of J_perp") << "mean " << perp_reduction_mean << ", max " << perp_reduction_max << "  (f: part of the current across B carried by dE/dt instead of particles)\n"
-                << "\tCurrent Distribution " << budget_along << "  [n0 e c]\n"
+            //! ---- CURRENT ----
+            oss << "CURRENT\n"
+                << kv1("AMP = d0^2/rho0") << AMP << "\n";
+            if (E_ideal_present) { oss << kv1("Hall / ideal part of E (RMS)") << E_hall_over_ideal << "\n"; }
+            else                 { oss << kv1("Hall / ideal part of E (RMS)") << "n/a (u_perturbed = 0)\n"; }
+            oss << kv1("Displacement share f of J_perp") << "mean " << perp_reduction_mean << ", max " << perp_reduction_max << "  (f = sigma_h/(1 + sigma_h), local)\n"
+                << "\tCurrent distribution " << budget_along << "  [n0 e c]\n"
                 << kv2("Total = AMP curl(B)") << required_rms << "  (100%)\n"
                 << kv2("Particle drift") << drift_along << "  (" << percent_of_required(drift_along) << ")\n"
-                << kv2("Convection (charge polarisation)") << convection_along << "  (" << percent_of_required(convection_along) << ")\n"
+                << kv2("Convection (polarisation charge)") << convection_along << "  (" << percent_of_required(convection_along) << ")\n"
                 << kv2("Displacement current (dE/dt)") << displacement_along << "  (" << percent_of_required(displacement_along) << ")\n"
-                << "\tCurrent Distribution " << budget_across << "  [n0 e c, RMS]\n"
-                << kv2("Particle drift + convection") << particle_across_rms << "  (" << percent_of_required(particle_across_rms) << across_note << ")\n"
-                << kv2("Displacement current (dE/dt)") << displacement_across_rms << "  (" << percent_of_required(displacement_across_rms) << ")\n"
-                << kv1("Enthalpy/particle (electrons, " + sp2s + ")") << "(" << enthalpy_per_particle_1 << ", " << enthalpy_per_particle_2 << ")  [m0 c^2]\n"
+                << "\tCurrent distribution " << budget_across << "  [n0 e c, RMS]\n"
+                << kv2("Particles (= -displacement current)") << particle_across_rms << "  (" << percent_of_required(particle_across_rms) << across_note << ")\n"
                 << kv1("Share of J (electrons, " + sp2s + ")") << "(" << current_share_1 << ", " << current_share_2 << ")  (zero net momentum)\n"
-                << kv1("u_drift_coeff (electrons, " + sp2s + ")") << "(" << u_drift_coeff_1 << ", " << u_drift_coeff_2 << ")\n"
                 << kv1("max |u_drift| [c] (electrons, " + sp2s + ")") << "(" << peak_u_drift_1 << ", " << peak_u_drift_2 << ")\n"
-                << kv1("mean |u_drift| [c] (electrons, " + sp2s + ")") << "(" << u_drift_mean_1 << ", " << u_drift_mean_2 << ")\n\n"
+                << kv1("max |u_drift| / v_th (electrons, " + sp2s + ")") << "(" << drift_over_thermal_1 << ", " << drift_over_thermal_2 << ")  (>~ 1: streaming instabilities)\n\n";
 
-
-                << "VELOCITY PERTURBATION\n"
+            //! ---- VELOCITY PERTURBATION ----
+            oss << "VELOCITY PERTURBATION\n"
                 << kv1("Enabled") << (perturb_velocity ? "YES" : "NO  (u_perturbed = 0 everywhere)") << "\n";
             if (perturb_velocity)
             {
-                oss << kv1("Phase seed (must differ from B's)") << v_seed << "  (B_perturbed uses " << B_seed << ")\n"
-                    << kv1("Number of modes") << u_perturbed_modes_host.size() << "\n"
+                oss << kv1("Phase seed of u_perturbed") << v_seed << "\n"
                     << kv1("u_total cap [c]") << u_total_cap << "\n"
-                    << kv1("u_perturbed_rms [c] target") << u_perturbed_rms_alfven << "  (= vA_hot * B_perturbed_rms / B_rms)\n"
-                    << kv1("u_perturbed_rms [c] loaded") << u_perturbed_rms << "\n"
-                    << kv2("max |u_perturbed| [c]") << peak_u_perturbed << "\n"
-                    << kv2("mean |u_perturbed| [c]") << u_perturbed_mean << "\n"
+                    << kv1("u_perturbed_rms [c]") << u_perturbed_rms << "  (= s vA_hot B_perturbed_rms / B_rms)\n"
                     << kv1("u_perturbed RMS (X, Y, Z) [c]") << "(" << u_perturbed_rms_component[0] << ", " << u_perturbed_rms_component[1] << ", " << u_perturbed_rms_component[2] << ")\n"
-                    << kv1("Cap factor s") << u_perturbed_cap_factor << ((u_perturbed_cap_factor < ONE) ? "  (u_perturbed REDUCED below the Alfven target)" : "  (Alfven target loaded)") << "\n"
-                    << kv1("Turbulent kinetic/magnetic energy") << (double)(u_perturbed_cap_factor * u_perturbed_cap_factor) << "  (= s^2, Alfven units; 1 = equipartition)\n"
-                    << kv1("Bulk kinetic / magnetic energy") << bulk_to_magnetic << "  (actual ratio w u^2 / (sigma0 dB^2), non-relativistic; motional E^2 holds most of the rest)\n";
-                if (sigma_c_valid) { oss << kv1("Cross-helicity, sigma_c") << sigma_c << "  (0 on average over seeds)\n"; }
-                else               { oss << kv1("Cross-helicity, sigma_c") << "n/a\n"; }
+                    << kv1("Cap factor s") << u_perturbed_cap_factor << ((u_perturbed_cap_factor < ONE) ? "  (REDUCED below the Alfven target)" : "  (Alfven target loaded)") << "\n"
+                    << kv1("Turbulent kinetic / magnetic energy") << bulk_to_magnetic << "  (w u^2 / (sigma0 dB^2), non-relativistic)\n";
+                if (sigma_c_valid) { oss << kv1("Cross-helicity sigma_c") << sigma_c << "  (0 on average over seeds)\n"; }
+                else               { oss << kv1("Cross-helicity sigma_c") << "n/a\n"; }
             }
+            oss << "\n";
 
-
-            oss << "\n"
-                << "MOTIONAL ELECTRIC FIELD AND GAUSS CONSTRAINT \n"
-                << kv1("Initial E") << "-u_motional x B,  u_motional = u_perturbed + u_drift_1 + u_drift_2\n"
-                << kv1("u_motional_coeff") << u_motional_coeff << "  (0 for a pair plasma at equal T)\n";
-            if (E_ideal_present) { oss << kv1("Hall / ideal part of E (RMS)") << E_hall_over_ideal << "\n"; }
-            else                 { oss << kv1("Hall / ideal part of E (RMS)") << "n/a (u_perturbed = 0)\n"; }
-            oss << kv1("rho/n_tot RMS (= AMP divE / n)") << rho_rms << "\n"
-                << kv1("rho/n_tot RMS, analytic div(E)") << rho_analytic_rms << "  (used by the convection term; should match the line above)\n"
-                << kv1("Species displacement RMS [d0]") << xi_rms << "  (" << xi_cells << " cells)\n"
-                << kv1("Species displacement max [d0]") << xi_max << "  (" << ((dx_d > 0.0) ? xi_max / dx_d : 0.0) << " cells)\n"
-                << kv1("Residual Gauss error (estimate)") << rho_rms * rho_rms << " of n_tot" 
-                << ((rho_rms > 0.0) ? "  (~ " + std::to_string(rho_rms * 100.0) + "% of rho; measured in the GAUSS-LAW CHECK)" : "  (n/a: rho = 0)") << "\n\n";
-
-
+            //! ---- UNLOADED DISPLACEMENT CURRENT ----
             oss << "UNLOADED DISPLACEMENT CURRENT AT t = 0 (estimates, RMS fraction of AMP curl(B))\n"
                 << "\tThe run starts with a transient of about this relative size; both vanish when E = 0 at t = 0\n";
             if (E_present)
@@ -2296,62 +2062,64 @@ namespace user
                     << kv1("Parallel dE/dt (keeps E.B = 0)") << "0  (E = 0 at t = 0)\n\n";
             }
 
+            //! ---- CHARACTERISTIC SCALES ----
+            oss << "CHARACTERISTIC SCALES\n"
+                << "\tSkin depth, cold (inertia m_s)\n"
+                << kv2("Electrons") << skin_depth_1_cold << "  (resolved with " << skin_depth_1_cold / dx << " cells)\n"
+                << kv2(SP2u) << skin_depth_2_cold << "  (resolved with " << skin_depth_2_cold / dx << " cells)\n"
+                << kv2("Plasma") << skin_depth_plasma_cold << "  (resolved with " << skin_depth_plasma_cold / dx << " cells)\n"
+                << "\tSkin depth, hot (inertia m_s <g_s>)\n"
+                << kv2("Electrons") << skin_depth_1_hot << "  (resolved with " << skin_depth_1_hot / dx << " cells)\n"
+                << kv2(SP2u) << skin_depth_2_hot << "  (resolved with " << skin_depth_2_hot / dx << " cells)\n"
+                << kv2("Plasma") << skin_depth_plasma_hot << "  (resolved with " << skin_depth_plasma_hot / dx << " cells)\n"
+                << "\tDebye length (no inertia factor)\n"
+                << kv2("Electrons") << debye_length_1 << "  (resolved with " << debye_length_1 / dx << " cells)\n"
+                << kv2(SP2u) << debye_length_2 << "  (resolved with " << debye_length_2 / dx << " cells)\n"
+                << kv2("Plasma") << debye_length_plasma << "  (resolved with " << debye_length_plasma / dx << " cells)\n"
+                << "\tLarmor radius (thermal, u = sqrt(<g>^2 - 1), at B_rms)\n"
+                << kv2("Electrons") << rho_1 << "  (resolved with " << rho_1 / dx << " cells)\n"
+                << kv2(SP2u) << rho_2 << "  (resolved with " << rho_2 / dx << " cells)\n"
+                << "\tConfinement: gyroradius at gamma_s = 1 + sigma_s,hot (at B_rms)\n"
+                << kv2("Electrons") << confinement_radius_1 << "  (" << confinement_radius_1 / L_min << " x box)\n"
+                << kv2(SP2u) << confinement_radius_2 << "  (" << confinement_radius_2 / L_min << " x box)\n\n";
 
-            oss << "CHARACTERISTIC SCALES (hot: inertia m <g>; Debye lengths need no inertia factor)\n"
-                << "\tPlasma (as a whole)\n"
-                << kv2("Skin depth") << d_plasma << "  (resolved with " << d_plasma / dx << " cells)\n"
-                << kv2("Debye length") << lambda_Dpl << "  (resolved with " << lambda_Dpl / dx << " cells; "
-                    << ((lambda_Dpl / dx >= DEBYE_FLOOR) ? "greater" : "LESS") << " than the required " << DEBYE_FLOOR << " dx = " << DEBYE_FLOOR * dx << ")\n"
-
-                << "\tElectrons\n"
-                << kv2("Skin depth") << d_1 << "  (resolved with " << d_1 / dx << " cells)\n"
-                << kv2("Larmor radius") << rho_1 << "  (resolved with " << rho_1 / dx << " cells)\n"
-                << kv2("Debye length") << lambda_D1 << "  (resolved with " << lambda_D1 / dx << " cells)\n"
-
-                << "\t" << SP2u << "\n"
-                << kv2("Skin depth") << d_2 << "  (resolved with " << d_2 / dx << " cells)\n"
-                << kv2("Larmor radius") << rho_2 << "  (resolved with " << rho_2 / dx << " cells)\n"
-                << kv2("Debye length") << lambda_D2 << "  (resolved with " << lambda_D2 / dx << " cells)\n"
-                << "\tConfinement\n"
-                << kv2("Larmor radius at gamma = 1 + sigma_hot") << rho_sigma << "  (" << rho_sigma / L_min << " x box)\n\n"
-
-
-                << "TEMPERATURES\n"
+            //! ---- TEMPERATURES ----
+            oss << "TEMPERATURES\n"
                 << kv1("T_1 = kT_1/(m0 c^2) of electrons") << temperature_1 << "  (setup.temperature)\n"
                 << kv1("T_2 = kT_2/(m0 c^2) of " + sp2s) << temperature_2 << "  (temperature_ratio = " << temperature_ratio << ")\n"
                 << kv1("theta_1 = kT_1/(m_1 c^2) of electrons") << theta_1 << "\n"
-                << kv1("theta_2 = kT_2/(m_2 c^2) of " + sp2s) << theta_2 << "\n\n"
+                << kv1("theta_2 = kT_2/(m_2 c^2) of " + sp2s) << theta_2 << "\n\n";
 
-
-                << "CONSISTENCY CHECKS\n"
-                << kv1("max |u_total_species| (must be <= cap)") << peak_u_total_both << "\n"
-                << kv1("max|curl B| mode sum / Yee (must be 1)") << curl_B_ratio_max << "\n"
+            //! ---- CONSISTENCY CHECKS ----
+            oss << "CONSISTENCY CHECKS\n"
+                << kv1("max |u_total_species| (<= cap)") << peak_u_total_both << "\n"
                 << kv1("max|curl B - curl B Yee| / max (->0)") << ampere_deviation << "\n"
                 << kv1("max|div B| / max|curl B|, Yee (->0)") << divB_over_curlB << "\n"
                 << kv1("Displacement current along B / required") << displacement_along_B << "  (->0: E.B stays 0)\n"
                 << kv1("Displacement current vs f (A - rho u)_perp") << displacement_theory_rel << "  (->0, relative)\n"
-                << kv1("dB/dt: curl(E) vs product rule") << (E_present ? std::to_string(dB_dt_check) : std::string("n/a (E = 0)")) << "  (->0, relative; checks the unloaded estimate)\n"
-                << kv1("lambda_D / dx (must be >~ 1/3)") << lD_ratio << "\n\n";
+                << kv1("dB/dt: curl(E) vs product rule") << (E_present ? std::to_string(dB_dt_check) : std::string("n/a (E = 0)")) << "  (->0, relative)\n"
+                << kv1("lambda_D / dx (>~ 1/3)") << lD_ratio << "\n"
+                << kv1("Omega_ce dt at max|B| (<~ 0.1-0.2)") << gyration_per_step << "\n"
+                << kv1("max charge displacement [cells]") << peak_displacement_cells << "  (must be << the local subdomain)\n\n";
 
             if (lD_ratio < DEBYE_FLOOR)
-                oss << "!! WARNING: lambda_D / dx = " << lD_ratio << " is BELOW the finite-grid\n"
-                    << "!! instability floor of " << DEBYE_FLOOR << ". Expect numerical heating;\n"
-                    << "!! refine the grid, raise the temperature, or raise ppc0.\n\n";
+                oss << "!! WARNING: lambda_D / dx = " << lD_ratio << " is BELOW the finite-grid instability floor of " << DEBYE_FLOOR << ".\n"
+                    << "!! Expect numerical heating; refine the grid or raise the temperature.\n\n";
             else if (lD_ratio < ONE)
-                oss << "!  NOTE: lambda_D is under one cell (" << lD_ratio << "), so Debye-scale\n"
-                    << "!  structure (shielding, Langmuir waves at k lambda_D ~ 1) is NOT resolved.\n"
-                    << "!  The grid-instability floor of " << DEBYE_FLOOR << " is still met, so heating\n"
-                    << "!  should be bounded rather than explosive -- confirm it on a short run.\n\n";
+                oss << "!  NOTE: lambda_D is under one cell (" << lD_ratio << "): Debye-scale structure is not resolved.\n"
+                    << "!  The floor of " << DEBYE_FLOOR << " is met, so heating should be bounded -- confirm it on a short run.\n\n";
+
+            if (gyration_per_step > 0.2)
+                oss << "!  NOTE: Omega_ce dt = " << gyration_per_step << " at max|B|: Boris phase error ~ (Omega dt)^2/12 per step.\n"
+                    << "!  Omega_ce dt = CFL (dx/d0) sqrt(sigma0) |B| / sqrt(D): lower CFL or refine the grid.\n\n";
 
             if (peak_u_total_loaded > (double)u_total_cap)
-                oss << "!  NOTE: with the convection term the peak |u_total| is " << peak_u_total_loaded << " c, above\n"
-                    << "!  setup.u_total_cap = " << u_total_cap << " (the cap uses the first-order current). The 0.99c clamp\n"
-                    << "!  still holds; lower u_total_cap slightly if this matters.\n\n";
+                oss << "!  NOTE: with the convection term the peak |u_total| is " << peak_u_total_loaded << " c, above setup.u_total_cap = " << u_total_cap << "\n"
+                    << "!  (the cap uses the first-order current). The 0.99c clamp still holds; lower u_total_cap slightly if this matters.\n\n";
 
             if (u_perturbed_cap_factor < ONE)
-                oss << "!  NOTE: u_perturbed was scaled by s = " << u_perturbed_cap_factor << " to keep\n"
-                    << "!  |u_total_species| <= " << u_total_cap << " c for both species. The run starts with\n"
-                    << "!  kinetic/magnetic fluctuation energy s^2 = " << u_perturbed_cap_factor * u_perturbed_cap_factor << " of the Alfven value.\n\n";
+                oss << "!  NOTE: u_perturbed was scaled by s = " << u_perturbed_cap_factor << " to keep |u_total_species| <= " << u_total_cap << " c.\n"
+                    << "!  The kinetic/magnetic fluctuation energy starts at s^2 = " << u_perturbed_cap_factor * u_perturbed_cap_factor << " of the Alfven value.\n\n";
 
             oss << "===========================================================\n";
 
@@ -2369,12 +2137,8 @@ namespace user
                 else { std::cout << "WARNING: could not write " << path << std::endl; }
             }
 
-            //! ---- HARD FAILURE: Ampere invariant ---------------------------------
-            //! The loaded J must BE the curl of the field that is actually written to
-            //! the grid. Both come from the same mode table, so this mainly catches a
-            //! sign or index error in the (kc x b) cross product, plus the
-            //! discretisation error. Checked on rank 0 only: raise::Error calls
-            //! MPI_Abort(MPI_COMM_WORLD), which stops every rank.
+            //! HARD FAILURE: the loaded J must be the curl of the field written to the grid (catches a sign or index error in kc x b).
+            //! Rank 0 only: raise::Error calls MPI_Abort(MPI_COMM_WORLD), which stops every rank.
             if (mpi_rank == 0)
             {
                 raise::ErrorIf(ampere_deviation > 1.0e-2,
@@ -2385,12 +2149,8 @@ namespace user
 
         //! =====================================================================
         //!  INITIALISE PARTICLES
-        //!
-        //!  Maxwell-Juttner at theta_s, drifting at the lab-frame velocity
-        //!  u_total_species = u_perturbed + u_drift_species (TurbCurrentDist).
-        //!  After the charge-loading displacement, each velocity is drawn again
-        //!  at the particle's final position (load_charge_density).
-        //!
+        //!  Maxwell-Juttner at theta_s, drifting at u_total_species = u_perturbed + u_drift_species (TurbCurrentDist); after the
+        //!  charge-loading displacement each velocity is drawn again at the particle's final position (load_charge_density).
         //! =====================================================================
         void InitPrtls(Domain<S, M>& local_domain)
         {
@@ -2400,10 +2160,10 @@ namespace user
             const auto edist_2 = TurbCurrentDist<M>(local_domain.random_pool(), theta_2, u_drift_coeff_2, init_flds, turb_vel);
             const auto sdist   = UniformDist<M::Dim>();
 
-            //? Total injected density = N_TOTAL = 1, split evenly (n_s = N_PER_SP)
+            //? total injected density N_TOTAL = 1, split evenly (n_s = N_PER_SP)
             arch::InjectNonUniform<S, M, decltype(edist_1), decltype(edist_2), decltype(sdist)>(params, local_domain, { 1, 2 }, { edist_1, edist_2 }, sdist, N_TOTAL);
-            
-            //? Account for charge density created by the motional E field, then redraw velocities at the displaced positions
+
+            //? charge density of the motional E field, then velocities redrawn at the displaced positions
             load_charge_density(local_domain, edist_1, edist_2);
 
             //? Gauss-law check of the loaded state: deposited charge vs AMP div(E)
@@ -2411,11 +2171,11 @@ namespace user
         }
 
         //! =====================================================================
-        //!  GAUSS-LAW CHECK (t = 0): deposited charge vs AMP div(E) of the loaded E field
-        //*  Charge: Entity's charge moment without smoothing (each particle in its own cell), in units of n0, at cell centres.
-        //*  div(E): Entity's Yee divergence at the nodes, averaged over each cell's corners to its centre.
-        //*  The two differ at O((k dx)^2) and the deposited charge carries particle noise, so global statistics are compared:
-        //*  slope -> 1 when the loading is right; a low correlation only means the charge is noise-dominated (small rho, low ppc0).
+        //!  GAUSS-LAW CHECK (t = 0): deposited charge vs AMP div(E)
+        //*  Charge: Entity's charge moment without smoothing, in units of n0 e, at cell centres.
+        //*  div(E): Entity's Yee divergence at the nodes, averaged over each cell's corners.
+        //*  They differ at O((k dx)^2) and the charge carries particle noise, so global statistics are compared:
+        //*  slope -> 1 when the loading is right; a low correlation only means the charge is noise-dominated.
         //! =====================================================================
         void check_gauss_law(Domain<S, M>& local_domain)
         {
@@ -2424,7 +2184,7 @@ namespace user
 
             auto buffer = local_domain.fields.buff;   //* scratch: [0] deposited charge, [1] div(E) at nodes
 
-            //* deposited charge density [n0], smoothing order 0
+            //* deposited charge density [n0 e], smoothing order 0
             arch::ComputeMomentWithSpecies<S, M, FldsID::Charge, 3>(params, local_domain, { 1, 2 }, buffer, {}, 0u, 0u);
 
             //* div(E) at the nodes, one layer past the active range so every active cell has all its corners
@@ -2515,93 +2275,35 @@ namespace user
         //! =====================================================================
         //!  GAUSS LAW CONSTRAINT: load the charge density the motional E field needs
         //!
-        //!  WHY IS A CHARGE DENSITY NEEDED AT ALL? 
-        //*     With E = -(u_motional x B),
-        //*     div(E) = -B.(curl u_motional) + u_motional.(curl B),
-        //*  which is nonzero: e.g. a divergence-free (solenoidal) in-plane 
-        //*  u_perturbed = grad(psi) x z in a guide field gives the pure-gradient 
-        //*  E_perp = +B_z grad(psi), which demands a matching charge density. 
-        //*  This is the polarisation charge that a relativistic Alfvenic fluctuation
-        //*  carries. Its ideal part scales as rho/n ~ (k d0) sqrt(sigma0) u_perturbed B,
-        //*  so it vanishes in the MHD limit (k d0 -> 0) and the non-relativistic 
-        //*  limit (sigma0 -> 0).
+        //!  WHY A CHARGE DENSITY?  With E = -(u_motional x B),
+        //*     div(E) = -B.(curl u_motional) + u_motional.(curl B) != 0.
+        //*  E.g. a solenoidal in-plane u_perturbed = grad(psi) x z in a guide field gives E_perp = +B_z grad(psi). This is the polarisation
+        //*  charge of a relativistic Alfvenic fluctuation; its ideal part scales as rho/n ~ (k d0) sqrt(sigma0) u_perturbed B, vanishing
+        //*  in the MHD (k d0 -> 0) and non-relativistic (sigma0 -> 0) limits.
         //*
-        //!  WHY SHOULD THE INITIAL PARTICLES ALREADY CARRY THIS CHARGE?
-        //*  entity evolves only Faraday's and Ampere's equations in time.
-        //*  div(E) is a DIAGNOSTIC and there is no Poisson cleaner. The deposition
-        //*  is exactly charge conserving (zigzag at O = 0, fused Esirkepov at
-        //*  O >= 1, both built from i1_prev/dx1_prev, i.e. charge displacement),
-        //*  so div(E) - 4 pi rho is preserved EXACTLY for all time.
-        //*  An initial violation is therefore frozen in, never relaxed.
+        //!  WHY AT t = 0?  Entity has no Poisson solver or divergence cleaner, and the deposition (zigzag or Esirkepov) is charge
+        //*  conserving, so div(E) - rho/AMP is preserved exactly for all time: an initial violation is frozen in.
         //*
-        //!  HOW IS THE CHARGE DENSITY CREATED HERE?
-        //*  The injector uses a single density profile for both species and places 
-        //*  them in pairs at the same positions, so n_1 = n_2 everywhere and the injected 
-        //*  plasma is exactly neutral. The charge density has been created by displacing 
-        //*  the particles: after injection, each species is shifted by a small distance xi_s, 
-        //*  in opposite directions for the two species. For an arbitrary rho this would
-        //*  require inverting div(xi) = -rho / (n q), but here rho is already the divergence 
-        //*  of a known field,
-        //*      rho = AMP div(E) = -AMP div(u_motional x B),  AMP = d0 sqrt(sigma0),
-        //*  so a displacement along E is sufficient. Displacing species s by xi_s changes 
-        //*  its density by dn_s = -n_s div(xi_s); the displacement has been chosen as 
-        //*  xi_s = -sign(q_s) a E, with n_s = n/2 and |q_s| = 1:
-        //*      rho = sum_s q_s dn_s = sum_s q_s (n/2) sign(q_s) a div(E) = n a div(E) 
-        //*  With a = AMP / n, rho is therefore reproduced to first order in xi (see ACCURACY), 
-        //*  without the need for a solver, FFT or grid inversion.
-        //*  Negative charges are shifted along +E and positive charges along -E.
+        //!  HOW?  The injector places the two species in pairs at the same positions (exactly neutral). Displacing species s by xi_s
+        //*  changes its density by dn_s = -n_s div(xi_s). With xi_s = -sign(q_s) a E, n_s = n/2 and |q_s| = 1:
+        //*      rho = sum_s q_s dn_s = n a div(E),
+        //*  so a = AMP / n reproduces rho = AMP div(E) to first order in xi, with no solver. Negative charges move along +E.
         //*
-        //!  ACCURACY: 
-        //*  dn_s = -n_s div(xi_s) is the linear density response; the true
-        //*  Jacobian is 1/(1 + div xi), so the leftover is O((div xi)^2).
-        //*
-        //!  REMAINING SECOND-ORDER TERMS: 
-        //*  Each velocity is redrawn at the particle's displaced position, so the drift
-        //*  matches where the particle sits. The displacement current of the J x B
-        //*  acceleration (sigma_h split) and the excess convection current of the displaced
-        //*  charge are removed from the drifts (InitFields::loaded_current). What remains is
-        //*  the nonlinear part of dE/dt: its parallel part (keeping E.B = 0) and its advective
-        //*  perpendicular part (see LIMITATIONS). Negligible at vA << c.
-        //*
-        //!  NOTE ON 2D: d/dz = 0, so E_z contributes nothing to div(E) and a 
-        //!  z-displacement would change no charge.
+        //!  ACCURACY: the linear response dn_s = -n_s div(xi_s) leaves O((div xi)^2). Velocities are redrawn at the displaced positions.
+        //!  2D: d/dz = 0, so E_z carries no charge and no z-displacement is applied.
         //!
         //! =====================================================================
-        //!  BOUNDARY BOOKKEEPING
-        //*
-        //*  Moving a particle is NOT just rewriting i1/dx1. The displacement is a
-        //*  few cells, so particles near a subdomain edge leave it, and Entity
-        //*  requires two further steps that normally live in the PUSHER
-        //*  (kernels/pushers/sr.hpp: boundaryConditions + mpi::SendTag):
-        //*
-        //*   1. PERIODIC WRAP. If a face of THIS subdomain is PrtlBC::PERIODIC --
-        //*      which means the subdomain spans the box in that direction, so no
-        //*      neighbour owns the cell -- then i -= ni / i += ni.
-        //*   2. SEND TAG. Otherwise an MPI neighbour owns it, and the particle must
-        //*      be tagged via mpi::SendTag. CommunicateParticles is TAG DRIVEN
-        //*      (kernels/comm.hpp PrepareOutgoingPrtls_kernel acts only on
-        //*      tag != alive), so an untagged out-of-range particle is never
-        //*      migrated: its i1 stays outside [0, ni1) and the first sort or
-        //*      deposit indexes out of bounds. On GPU that surfaces as
-        //*      "Memory access fault ... Reason: Unknown".
-        //*
-        //*  CommunicateParticles moves a tagged particle to the ADJACENT subdomain
-        //*  only, shifting its cell index by that subdomain's size. A displacement
-        //*  longer than a whole neighbouring subdomain would land out of range there,
-        //*  so the sampled peak |xi| is checked against the local subdomain size
-        //*  before anything moves (with a 2x margin for sampling and for neighbours
-        //*  one cell smaller).
-        //*
-        //*  A final in-range guard undoes the displacement for any particle that is
-        //*  somehow still out of range and untagged. It should never fire; it is
-        //*  there so that a mistake degrades the charge loading locally instead of
-        //*  corrupting memory.
-        //*
+        //!  BOUNDARY BOOKKEEPING (normally done by the pusher, kernels/pushers/sr.hpp)
+        //*   1. PERIODIC WRAP on faces where this subdomain's particle BC is PERIODIC (it spans the box in that direction).
+        //*   2. SEND TAG otherwise (mpi::SendTag). CommunicateParticles only moves particles with tag != alive; an untagged
+        //*      out-of-range particle corrupts memory at the first sort or deposit.
+        //*  CommunicateParticles moves a particle to the ADJACENT subdomain only, so the sampled peak |xi| is checked against the local
+        //*  subdomain size first (2x margin). A final guard keeps any particle that would stay out of range and untagged where it was.
         //! =====================================================================
         void load_charge_density(Domain<S, M>& local_domain, const TurbCurrentDist<M>& edist_1, const TurbCurrentDist<M>& edist_2)
         {
             //* local copies: a device lambda must not capture `this`
-            const auto flds   = init_flds;                 //* carries u_perturbed, B and curl(B)
+            const auto flds   = init_flds;
             const auto metric = local_domain.mesh.metric;
 
             //* local active cell counts, for the wrap and the range test
@@ -2609,7 +2311,7 @@ namespace user
             const int ni2 = static_cast<int>(local_domain.mesh.n_active(in::x2));
             const int ni3 = (D == Dim::_3D)? static_cast<int>(local_domain.mesh.n_active(in::x3)) : 1;
 
-            //* displacements must stay well inside one neighbouring subdomain (see BOUNDARY BOOKKEEPING)
+            //* displacements must stay well inside one neighbouring subdomain
             {
                 const auto&  global_mesh         = metadomain.mesh();
                 const double cell_size           = (double)Lx / (double)global_mesh.n_active(in::x1);
@@ -2617,14 +2319,13 @@ namespace user
                 if constexpr (D == Dim::_3D) { smallest_local_side = std::min(smallest_local_side, ni3); }
                 const double peak_displacement_cells = (double)peak_charge_displacement / cell_size;
                 raise::ErrorIf(2.0 * peak_displacement_cells >= (double)smallest_local_side,
-                               "Charge-loading displacement (peak " + std::to_string(peak_displacement_cells) + 
-                               " cells) is not small compared with this MPI subdomain (" + std::to_string(smallest_local_side) + 
+                               "Charge-loading displacement (peak " + std::to_string(peak_displacement_cells) +
+                               " cells) is not small compared with this MPI subdomain (" + std::to_string(smallest_local_side) +
                                " cells): particles could skip a whole neighbour. Use fewer ranks along the "
                                "short direction, a finer grid, or a smaller u_perturbed / sigma0.", HERE);
             }
 
-            //* PERIODIC on a face => this subdomain spans the box in that
-            //* direction, so wrap locally. Anything else => a neighbour owns it.
+            //* PERIODIC on a face => this subdomain spans the box in that direction: wrap locally. Otherwise a neighbour owns it.
             const auto bcs     = local_domain.mesh.prtl_bc();
             const bool per1min = (bcs[0].first  == PrtlBC::PERIODIC);
             const bool per1max = (bcs[0].second == PrtlBC::PERIODIC);
@@ -2641,7 +2342,7 @@ namespace user
             {
                 const real_t q_s  = (s == 0u) ? sp1_charge : sp2_charge;
                 const real_t sgn  = (q_s < ZERO) ? -ONE : ONE;
-                //* xi_s = -sign(q_s) * (AMP / n_tot) * E
+                //* xi_s = -sign(q_s) (AMP / n_tot) E
                 const real_t coef = -sgn * AMP / N_TOTAL;
 
                 //* velocity distribution of this species, redrawn at the displaced position
@@ -2676,17 +2377,10 @@ namespace user
                     x_Ph[1] += coef * Ey;
                     if constexpr (D == Dim::_3D) { x_Ph[2] += coef * Ez; }
 
-                    //* back to code coords, then re-split into cell + offset.
-                    //* floor (not truncation) so that negative x_Cd, which a
-                    //* particle pushed off the low edge of the local domain will
-                    //* have, still yields dx in [0, 1). Out-of-range cells are
-                    //* resolved by the particle exchange below.
+                    //* back to code coords; floor (not truncation) keeps dx in [0, 1) for negative x_Cd
                     metric.template convert<Crd::XYZ, Crd::Cd>(x_Ph, x_Cd);
 
-                    //* split x_Cd into (cell, offset). prtldx_t is float while
-                    //* real_t may be double, so the narrowing cast can round an
-                    //* offset just under 1 up to exactly 1; carry it into the
-                    //* cell index, because the shape functions require dx in [0, 1).
+                    //* split into (cell, offset); prtldx_t is float, so an offset that rounds to 1 is carried into the cell index
                     auto split = [](real_t x, int& cell, prtldx_t& off)
                     {
                         cell = static_cast<int>(math::floor(x));
@@ -2729,13 +2423,13 @@ namespace user
                         tagged = (tag(p) != ParticleTag::alive);
                     }
                     //* (3) guard: never leave an untagged particle out of range
-                    if (outside && !tagged) { return; }   //* keep it where it was
+                    if (outside && !tagged) { return; }
 
                     i1(p) = c1; dx1(p) = o1;
                     i2(p) = c2; dx2(p) = o2;
                     if constexpr (D == Dim::_3D) { i3(p) = c3; dx3(p) = o3; }
 
-                    //* (4) redraw the velocity at the displaced (periodic, global) position: thermal spread + u_perturbed + u_drift_species there
+                    //* (4) redraw the velocity at the displaced position (the mode sums are box-periodic, so an unwrapped x_Ph is fine)
                     vec_t<Dim::_3D> four_velocity { ZERO };
                     edist(x_Ph, four_velocity);
                     ux1(p) = four_velocity[0];
@@ -2744,11 +2438,7 @@ namespace user
                 });
             }
 
-            //! MANDATORY. The displacement is ~ a few cells, so particles near a
-            //! subdomain edge now sit outside it. entity's MPI exchange does not
-            //! run until AFTER the first push and deposit (srpic.hpp: ParticlePush
-            //! -> CurrentsDeposit -> CommunicateParticles), so without this call the
-            //! first deposit would index out of range.
+            //! MANDATORY: Entity's own exchange runs only after the first push and deposit, so without this the first deposit would index out of range
             metadomain.CommunicateParticles(local_domain);
         }
     };
