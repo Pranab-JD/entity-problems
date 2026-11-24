@@ -10,7 +10,7 @@ Usage:
     input="/scratch/project_465002528/pjd/turbulence/fields/"
     output="/scratch/project_465002528/pjd/turbulence/plots/"
 
-    srun python3 ../postprocessing/Plot_J_rho.py "$input" "$output" --Lx 256.0 --Ly 256.0 --larmor0 10.0 --u-rms 0.04
+    srun python3 ../postprocessing/Plot_J_rho.py "$input" "$output" --Lx 256.0 --Ly 256.0 --larmor0 10.0
 
     Required:
         --Lx        box length along x in code units (d_e)
@@ -23,7 +23,10 @@ Usage:
         --dens-var  density variable name in the .bp file (default: fN). Use fN_1 /
                     fN_2 if Entity was configured to write per-species moments
         --b-guide   guide field [B0] for Omega_ce (default: 1)
-        --u-rms     initial turbulent u_rms [c]; gives t_eddy = 1 / (k_min u_rms), k_min = 2 pi / L_x
+        --params    Simulation_params.txt to read u_rms from (its "u_perturbed_rms [c] loaded" line);
+                    default: the fields directory's parent, then the fields directory itself
+        --u-rms     turbulent u_rms [c], overriding the value read from Simulation_params.txt;
+                    gives t_eddy = 1 / (k_min u_rms), k_min = 2 pi / L_x
         --t-eddy    outer-scale eddy turnover time [1/w_pe]; overrides --u-rms
         --pct       percentile used for the colour limits (default: 99.5)
         --per-frame rescale colours independently for every snapshot 
@@ -61,6 +64,7 @@ TIME_KEY = "Time"
 N_TICKS  = 5          #! exactly this many equidistant ticks on BOTH axes of EVERY panel
 N_SAMPLE = 8          #! snapshots sampled when building the shared colour scale
 BLOCK_DE = 1.0        #! maps are block-averaged over BLOCK_DE x BLOCK_DE [d_e] before plotting (no aliasing)
+PARAMS_FILE = "Simulation_params.txt"   #! setup printout; u_rms is read from its "u_perturbed_rms [c] loaded" line
 
 #! ============================================================
 #! MPI setup
@@ -81,7 +85,8 @@ parser.add_argument("--Lz",        type=float, default=None,  help="Box length a
 parser.add_argument("--dens-var",  type=str,   default="fN",  dest="dens_var", help="Density variable name (fN, fN_1, fN_2, ...)")
 parser.add_argument("--larmor0",   type=float, required=True, help="rho0 = m0 c^2 / (e B0) in code units, for Omega_ce = B_guide / rho0")
 parser.add_argument("--b-guide",   type=float, default=1.0,   dest="b_guide", help="Guide field [B0] for Omega_ce (default: 1)")
-parser.add_argument("--u-rms",     type=float, default=None,  dest="u_rms", help="Initial turbulent u_rms [c]; t_eddy = 1 / (k_min u_rms), k_min = 2 pi / L_x")
+parser.add_argument("--u-rms",     type=float, default=None,  dest="u_rms", help="Turbulent u_rms [c]; overrides Simulation_params.txt; t_eddy = 1 / (k_min u_rms), k_min = 2 pi / L_x")
+parser.add_argument("--params",    type=str,   default=None,  help="Simulation_params.txt to read u_rms from (default: fields dir parent, then fields dir)")
 parser.add_argument("--t-eddy",    type=float, default=None,  dest="t_eddy", help="Outer eddy turnover time [1/w_pe]; overrides --u-rms")
 parser.add_argument("--pct",       type=float, default=99.5,  help="Percentile for colour limits")
 parser.add_argument("--per-frame", action="store_true", dest="per_frame", help="Rescale colours per snapshot instead of using one fixed scale")
@@ -114,6 +119,30 @@ if larmor0 <= 0.0:
     parser.error("--larmor0 must be positive")
 if u_rms is not None and u_rms <= 0.0:
     parser.error("--u-rms must be positive")
+
+#! u_rms: --u-rms if given, otherwise the "loaded" value in Simulation_params.txt (fields directory's parent, then the fields directory)
+def read_loaded_u_rms(path):
+    #* value on the "u_perturbed_rms [c] loaded = ..." line; None if the file or the line is missing
+    try:
+        with open(path, "r") as params_file:
+            for line in params_file:
+                if "u_perturbed_rms [c] loaded" in line and "=" in line:
+                    return float(line.split("=", 1)[1].split()[0])
+    except (OSError, ValueError, IndexError):
+        return None
+    return None
+
+u_rms_source = "--u-rms"
+if u_rms is None:
+    if rank == 0:
+        candidates = [args.params] if args.params else [os.path.join(os.path.dirname(os.path.normpath(base)), PARAMS_FILE), os.path.join(base, PARAMS_FILE)]
+        u_rms_source = "not found in " + ", ".join(candidates)
+        for path in candidates:
+            value = read_loaded_u_rms(path)
+            if value is not None and value > 0.0:
+                u_rms, u_rms_source = value, path
+                break
+    u_rms, u_rms_source = comm.bcast((u_rms, u_rms_source), root=0)
 
 #! outer-scale eddy turnover time: t_eddy = 1 / (k_min u_rms),  k_min = 2 pi / L_x
 if t_eddy is None and u_rms is not None:
@@ -241,6 +270,7 @@ if rank == 0:
         print(f"    Cut plane           = z = {0.5 * Lz:g} (k = {Nz_global // 2} of {Nz_global})", flush=True)
     print(f"    Density variable    = {dens_var}", flush=True)
     print(f"    rho0, B_guide        = {larmor0:g}, {b_guide:g}", flush=True)
+    print(f"    u_rms [c]            = {u_rms:.6g}  ({u_rms_source})" if u_rms is not None else f"    u_rms [c]            = none  ({u_rms_source})", flush=True)
     if t_eddy is not None:
         print(f"    Eddy turnover [1/w_pe] = {t_eddy:.6g}", flush=True)
     else:
